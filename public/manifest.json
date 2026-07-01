@@ -1,6 +1,6 @@
 {
-  "name": "Antigravity SSH Portal",
-  "short_name": "AntiSSH",
+  "name": "Web-SSH Portal",
+  "short_name": "WebSSH",
   "description": "Premium Web SSH Client and Server Connection Manager",
   "start_url": "/",
   "display": "standalone",

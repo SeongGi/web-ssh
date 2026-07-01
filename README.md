@@ -1,6 +1,6 @@
-# SeonGi SSH Portal 🌐🛡️
+# Web-SSH Portal 🌐🛡️
 
-**SeonGi SSH Portal**은 웹 브라우저에서 다수의 SSH 서버를 관리하고 웹 터미널을 통해 실시간으로 원격 서버에 안전하게 접속할 수 있는 **Docker 기반의 웹 SSH Connection Manager**입니다. 
+**Web-SSH Portal**은 웹 브라우저에서 다수의 SSH 서버를 관리하고 웹 터미널을 통해 실시간으로 원격 서버에 안전하게 접속할 수 있는 **Docker 기반의 웹 SSH Connection Manager**입니다. 
 
 자체적인 관리자 인증 장치, 계정/포털 브랜딩 변경 기능, 서버 그룹 관리 및 접기/펴기 기능, 그리고 머신 스펙 진단기까지 탑재된 프리미엄 모던 웹 솔루션입니다.
 
@@ -77,7 +77,7 @@ docker compose up -d --build
 - **초기 관리자 비밀번호**: `adminpassword`
 
 > **[중요 보안 경고]**  
-> 최초 로그인 후, 대시보드 상단 우측의 **[계정 정보 변경]** 버튼을 클릭하여 기본 아이디(`admin`)와 패스워드(`adminpassword`)를 반드시 새로운 값으로 변경한 후 사용해 주세요! 포털 명칭(기본값: *SeonGi SSH Portal*)도 대화상자에서 손쉽게 변경하실 수 있습니다.
+> 최초 로그인 후, 대시보드 상단 우측의 **[계정 정보 변경]** 버튼을 클릭하여 기본 아이디(`admin`)와 패스워드(`adminpassword`)를 반드시 새로운 값으로 변경한 후 사용해 주세요! 포털 명칭(기본값: *Web-SSH Portal*)도 대화상자에서 손쉽게 변경하실 수 있습니다.
 
 ---
 

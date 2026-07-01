@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Login - Antigravity SSH Portal</title>
+  <title>Login - Web-SSH Portal</title>
   <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -119,7 +119,7 @@
         <div class="login-logo">
           <i data-lucide="shield-alert"></i>
         </div>
-        <h2 id="portal-title-text">SeonGi SSH Portal</h2>
+        <h2 id="portal-title-text">Web-SSH Portal</h2>
         <p>인증된 관리자 계정으로 로그인하세요.</p>
       </div>
 
@@ -155,7 +155,7 @@
         const res = await fetch('/api/config');
         if (res.ok) {
           const data = await res.json();
-          const name = data.portalName || 'SeonGi SSH Portal';
+          const name = data.portalName || 'Web-SSH Portal';
           document.title = `Login - ${name}`;
           document.getElementById('portal-title-text').innerText = name;
         }

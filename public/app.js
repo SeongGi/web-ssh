@@ -50,7 +50,7 @@ async function fetchConfig() {
     const res = await fetch('/api/config');
     if (res.ok) {
       const data = await res.json();
-      const name = data.portalName || 'SeonGi SSH Portal';
+      const name = data.portalName || 'Web-SSH Portal';
       document.title = name;
       const brandTitle = document.getElementById('brand-title');
       if (brandTitle) brandTitle.innerText = name;
@@ -760,12 +760,12 @@ async function openPwdModal() {
     const resConfig = await fetch('/api/config');
     if (resConfig.ok) {
       const data = await resConfig.json();
-      document.getElementById('new-portal-name').value = data.portalName || 'SeonGi SSH Portal';
+      document.getElementById('new-portal-name').value = data.portalName || 'Web-SSH Portal';
     }
   } catch (err) {
     console.warn('Failed to load profile details:', err);
     document.getElementById('new-username').value = 'admin';
-    document.getElementById('new-portal-name').value = 'SeonGi SSH Portal';
+    document.getElementById('new-portal-name').value = 'Web-SSH Portal';
   }
 
   passwordModal.classList.add('active');
