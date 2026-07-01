@@ -17,7 +17,7 @@ const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 
 let authConfig = { username: 'admin', salt: '', hash: '' };
-let appConfig = { portalName: 'SeonGi SSH Portal' };
+let appConfig = { portalName: 'Web-SSH Portal' };
 
 // Initialize portal config
 if (!fs.existsSync(CONFIG_FILE)) {

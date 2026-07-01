@@ -1,4 +1,4 @@
-const CACHE_NAME = 'antigravity-ssh-v2';
+const CACHE_NAME = 'web-ssh-v2';
 const ASSETS = [
   '/',
   '/index.html',
