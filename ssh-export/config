@@ -1,0 +1,23 @@
+Host oci
+HostName 64.110.68.20
+User opc
+IdentityFile ~/.ssh/oci.pem
+Port 22
+TCPKeepAlive yes
+IdentitiesOnly yes
+
+Host ubuntu
+HostName 140.238.17.31
+User ubuntu
+IdentityFile ~/.ssh/ubuntu.pem
+Port 22
+TCPKeepAlive yes
+IdentitiesOnly yes
+
+Host oci-arm
+HostName 217.142.140.15
+User ubuntu
+IdentityFile ~/.ssh/oci-arm.pem
+Port 22
+TCPKeepAlive yes
+IdentitiesOnly yes

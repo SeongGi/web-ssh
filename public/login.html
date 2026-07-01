@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login - Antigravity SSH Portal</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="style.css?v=5">
+  <style>
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: var(--bg-gradient);
+    }
+    .login-container {
+      width: 100%;
+      max-width: 400px;
+      padding: 1.5rem;
+    }
+    .login-card {
+      backdrop-filter: blur(16px);
+      background: var(--glass-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: var(--border-radius-lg);
+      padding: 2.5rem 2rem;
+      box-shadow: var(--glass-shadow), 0 0 40px rgba(139, 92, 246, 0.1);
+      display: flex;
+      flex-direction: column;
+      gap: 1.8rem;
+      animation: zoomIn 0.3s ease-out;
+    }
+    .login-header {
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.8rem;
+    }
+    .login-logo {
+      background: var(--primary-gradient);
+      width: 56px;
+      height: 56px;
+      border-radius: var(--border-radius-md);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: var(--primary-glow);
+    }
+    .login-logo i {
+      color: #fff;
+      width: 28px;
+      height: 28px;
+    }
+    .login-header h2 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      background: linear-gradient(to right, #fff, #94a3b8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .login-header p {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+    }
+    .login-form {
+      display: flex;
+      flex-direction: column;
+      gap: 1.2rem;
+    }
+    .login-btn {
+      width: 100%;
+      height: 46px;
+      font-size: 0.95rem;
+      margin-top: 0.5rem;
+    }
+    .error-msg {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: var(--color-offline);
+      border-radius: var(--border-radius-md);
+      padding: 0.75rem 1rem;
+      font-size: 0.8rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      animation: shake 0.3s ease;
+    }
+    .credentials-hint {
+      text-align: center;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      line-height: 1.4;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      padding-top: 1rem;
+    }
+    @keyframes zoomIn {
+      from { opacity: 0; transform: scale(0.95); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      25% { transform: translateX(-5px); }
+      75% { transform: translateX(5px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="login-container">
+    <div class="login-card">
+      <div class="login-header">
+        <div class="login-logo">
+          <i data-lucide="shield-alert"></i>
+        </div>
+        <h2 id="portal-title-text">SeonGi SSH Portal</h2>
+        <p>인증된 관리자 계정으로 로그인하세요.</p>
+      </div>
+
+      <div id="error-container" class="error-msg hidden">
+        <i data-lucide="alert-circle" style="width:16px;height:16px"></i>
+        <span id="error-text">로그인 정보가 잘못되었습니다.</span>
+      </div>
+
+      <form id="login-form" class="login-form">
+        <div class="form-group">
+          <label for="username">사용자 이름</label>
+          <input type="text" id="username" name="username" required placeholder="admin" autocomplete="username">
+        </div>
+        <div class="form-group">
+          <label for="password">비밀번호</label>
+          <input type="password" id="password" name="password" required placeholder="비밀번호 입력" autocomplete="current-password">
+        </div>
+        <button type="submit" class="btn btn-primary login-btn">
+          <i data-lucide="log-in"></i>
+          <span>로그인</span>
+        </button>
+      </form>
+
+    </div>
+  </div>
+
+  <script>
+    lucide.createIcons();
+
+    // Load and apply portal name dynamically from config API
+    async function loadPortalName() {
+      try {
+        const res = await fetch('/api/config');
+        if (res.ok) {
+          const data = await res.json();
+          const name = data.portalName || 'SeonGi SSH Portal';
+          document.title = `Login - ${name}`;
+          document.getElementById('portal-title-text').innerText = name;
+        }
+      } catch (e) {
+        console.warn('Failed to load portal config:', e);
+      }
+    }
+    loadPortalName();
+
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+      const errorContainer = document.getElementById('error-container');
+      const errorText = document.getElementById('error-text');
+
+      errorContainer.classList.add('hidden');
+
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ username, password })
+        });
+
+        const data = await res.json();
+
+        if (res.ok && data.success) {
+          window.location.href = '/';
+        } else {
+          errorText.innerText = data.error || '로그인에 실패했습니다.';
+          errorContainer.classList.remove('hidden');
+          lucide.createIcons();
+        }
+      } catch (err) {
+        console.error('Login error:', err);
+        errorText.innerText = '네트워크 통신 오류가 발생했습니다.';
+        errorContainer.classList.remove('hidden');
+        lucide.createIcons();
+      }
+    });
+  </script>
+</body>
+</html>

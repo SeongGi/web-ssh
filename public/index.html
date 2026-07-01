@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SeonGi SSH Portal</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- xterm.css -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="style.css?v=8">
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#0e122b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="apple-touch-icon" href="/icon.jpg">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo-area">
+        <div class="logo-icon">
+          <i data-lucide="terminal"></i>
+        </div>
+        <div class="logo-text">
+          <h1 id="brand-title">SeonGi SSH Portal</h1>
+          <span class="sub-text">Web Connection Dashboard</span>
+        </div>
+      </div>
+      <div class="header-actions" style="display: flex; gap: 0.75rem;">
+        <button id="add-server-btn" class="btn btn-primary">
+          <i data-lucide="plus"></i>
+          <span>새 서버 추가</span>
+        </button>
+        <button id="change-pwd-btn" class="btn btn-secondary btn-icon-text">
+          <i data-lucide="key-round"></i>
+          <span>계정 정보 변경</span>
+        </button>
+        <button id="logout-btn" class="btn btn-secondary btn-icon" title="로그아웃" style="color: var(--color-offline);">
+          <i data-lucide="log-out"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="app-main">
+      <div class="stats-bar">
+        <div class="stat-card">
+          <span class="stat-label">전체 서버</span>
+          <span id="total-servers-count" class="stat-value">0</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">온라인 서버</span>
+          <span id="online-servers-count" class="stat-value">0</span>
+        </div>
+        <button id="refresh-all-status" class="btn btn-icon-text">
+          <i data-lucide="refresh-cw"></i>
+          <span>상태 새로고침</span>
+        </button>
+      </div>
+
+      <!-- Server Groups and Cards Container -->
+      <div class="server-container" id="server-grid">
+        <!-- Dynamic Groups and Cards Inserted Here -->
+      </div>
+    </main>
+
+    <!-- CRUD Modal -->
+    <div id="server-modal" class="modal-overlay">
+      <div class="modal-card">
+        <header class="modal-header">
+          <h2 id="modal-title">새 SSH 서버 등록</h2>
+          <button class="btn-close" id="modal-close-btn">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <form id="server-form">
+          <input type="hidden" id="server-id" name="id">
+          
+          <div class="form-row">
+            <div class="form-group">
+              <label for="server-name">서버 이름 (Alias)</label>
+              <input type="text" id="server-name" name="name" required placeholder="예: ubuntu-dev, web-prod">
+            </div>
+            <div class="form-group">
+              <label for="server-group">그룹 (Group)</label>
+              <input type="text" id="server-group" name="group" placeholder="예: OCI Cloud, AWS">
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group flex-3">
+              <label for="server-host">호스트 IP 주소 또는 도메인</label>
+              <div class="input-with-button">
+                <input type="text" id="server-host" name="host" required placeholder="예: 140.238.17.31">
+                <button type="button" class="btn btn-secondary" id="btn-ip-scan" style="padding: 0.5rem 1rem; font-size: 0.8rem; height: 42px;">IP 스캔</button>
+              </div>
+            </div>
+            <div class="form-group flex-1">
+              <label for="server-port">포트 (Port)</label>
+              <input type="number" id="server-port" name="port" value="22" required placeholder="22">
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="server-username">접속 사용자 이름 (User)</label>
+              <input type="text" id="server-username" name="username" required placeholder="예: ubuntu, root, opc">
+            </div>
+            <div class="form-group">
+              <label for="server-authType">인증 방식</label>
+              <select id="server-authType" name="authType">
+                <option value="key">SSH Private Key (.pem)</option>
+                <option value="password">비밀번호 (Password)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Password Auth Section -->
+          <div id="auth-password-section" class="form-group auth-section hidden">
+            <label for="server-password">비밀번호</label>
+            <input type="password" id="server-password" name="password" placeholder="비밀번호 입력">
+          </div>
+
+          <!-- Key Auth Section -->
+          <div id="auth-key-section" class="form-group auth-section">
+            <label for="server-privateKey">Private Key (.pem 파일 내용)</label>
+            <textarea id="server-privateKey" name="privateKey" rows="6" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+            <span class="field-hint" id="key-status-hint">새로운 키 파일 내용을 직접 붙여넣거나 비워두면 기존 설정이 유지됩니다.</span>
+          </div>
+
+          <!-- Diagnostic Spec Scan -->
+          <div class="form-group" style="margin: 0.2rem 0;">
+            <button type="button" class="btn btn-secondary" id="btn-system-scan" style="width: 100%; border: 1px dashed var(--glass-border-hover); gap: 0.5rem; height: 42px;">
+              <i data-lucide="shield-check" style="color: var(--accent-color); width: 16px; height: 16px;"></i>
+              <span id="system-scan-text">서버 접속 진단 및 OS/스펙 자동 감지</span>
+            </button>
+            <span class="field-hint" id="system-scan-status">※ 호스트, 계정명, 비밀번호/키 파일 내용 입력 후 검사를 누르면 스펙정보를 자동 완성합니다.</span>
+          </div>
+
+          <!-- Optional metadata -->
+          <div class="form-row">
+            <div class="form-group">
+              <label for="server-os">운영체제 (OS)</label>
+              <input type="text" id="server-os" name="os" placeholder="예: Ubuntu 24.04, Oracle Linux 9">
+            </div>
+            <div class="form-group">
+              <label for="server-spec">서버 스펙 (Spec)</label>
+              <input type="text" id="server-spec" name="spec" placeholder="예: 4 CPU / 24GB RAM">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="server-description">서버 설명</label>
+            <input type="text" id="server-description" name="description" placeholder="예: 웹서비스 운영용 ARM 인스턴스">
+          </div>
+
+          <footer class="modal-footer">
+            <button type="button" class="btn btn-secondary" id="modal-cancel-btn">취소</button>
+            <button type="submit" class="btn btn-primary" id="modal-submit-btn">저장하기</button>
+          </footer>
+        </form>
+      </div>
+    </div>
+
+    <!-- Change Profile Modal -->
+    <div id="password-modal" class="modal-overlay">
+      <div class="modal-card" style="max-width: 420px;">
+        <header class="modal-header">
+          <h2>관리자 계정 설정 변경</h2>
+          <button class="btn-close" id="pwd-close-btn">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <form id="password-form" style="display: flex; flex-direction: column; gap: 1.2rem;">
+          <div class="form-group">
+            <label for="current-pwd">현재 비밀번호</label>
+            <input type="password" id="current-pwd" name="currentPassword" required placeholder="현재 비밀번호 입력">
+          </div>
+          <div class="form-group">
+            <label for="new-username">사용자 이름 (ID)</label>
+            <input type="text" id="new-username" name="newUsername" required placeholder="변경할 ID 입력">
+          </div>
+          <div class="form-group">
+            <label for="new-portal-name">포털 이름 (Portal Name)</label>
+            <input type="text" id="new-portal-name" name="portalName" required placeholder="변경할 포털 이름 입력">
+          </div>
+          <div class="form-group">
+            <label for="new-pwd">새 비밀번호 (비워두면 기존 유지)</label>
+            <input type="password" id="new-pwd" name="newPassword" placeholder="새 비밀번호 입력">
+          </div>
+          <div class="form-group">
+            <label for="confirm-pwd">새 비밀번호 확인</label>
+            <input type="password" id="confirm-pwd" name="confirmPassword" placeholder="새 비밀번호 재입력">
+          </div>
+          <div class="error-msg hidden" id="pwd-error-container" style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: var(--color-offline); border-radius: var(--border-radius-md); padding: 0.75rem 1rem; font-size: 0.8rem; display: flex; align-items: center; gap: 0.5rem; margin-top: 0.2rem;">
+            <i data-lucide="alert-circle" style="width:16px;height:16px"></i>
+            <span id="pwd-error-text">비밀번호가 일치하지 않습니다.</span>
+          </div>
+          <footer class="modal-footer">
+            <button type="button" class="btn btn-secondary" id="pwd-cancel-btn">취소</button>
+            <button type="submit" class="btn btn-primary">변경 사항 저장</button>
+          </footer>
+        </form>
+      </div>
+    </div>
+
+    <!-- Terminal Screen Modal -->
+    <div id="terminal-modal" class="terminal-overlay">
+      <div class="terminal-container">
+        <header class="terminal-header">
+          <div class="terminal-info">
+            <div class="status-indicator-green pulse" id="terminal-status-dot"></div>
+            <span class="terminal-title" id="terminal-server-title">ubuntu@140.238.17.31</span>
+          </div>
+          <div class="terminal-actions">
+            <button class="btn btn-icon" id="terminal-clear" title="화면 비우기">
+              <i data-lucide="trash-2"></i>
+            </button>
+            <button class="btn btn-icon" id="terminal-close-btn" title="세션 종료">
+              <i data-lucide="log-out"></i>
+            </button>
+          </div>
+        </header>
+        <div id="terminal-body" class="terminal-body">
+          <!-- xterm.js binds here -->
+        </div>
+
+        <!-- Terminal Exit Overlay Actions -->
+        <div id="terminal-exit-overlay" class="terminal-exit-overlay hidden">
+          <div class="exit-card">
+            <div class="exit-card-icon">
+              <i data-lucide="alert-circle" style="width: 32px; height: 32px; color: var(--color-warning);"></i>
+            </div>
+            <h3>연결이 종료되었습니다</h3>
+            <p>SSH 세션 연결이 해제되었습니다. 실행할 작업을 선택하세요.</p>
+            <div class="exit-actions">
+              <button class="btn btn-primary" id="btn-reconnect">
+                <i data-lucide="refresh-cw"></i>
+                <span>다시 연결하기</span>
+              </button>
+              <button class="btn btn-secondary" id="btn-to-dashboard">
+                <i data-lucide="layout-dashboard"></i>
+                <span>메인 화면으로</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- xterm.js script -->
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <!-- xterm-addon-fit script -->
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <!-- Custom JS -->
+  <script src="app.js?v=8"></script>
+  <!-- PWA Service Worker Registration -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+          .then(reg => console.log('Service Worker registered successfully:', reg.scope))
+          .catch(err => console.error('Service Worker registration failed:', err));
+      });
+    }
+  </script>
+</body>
+</html>
