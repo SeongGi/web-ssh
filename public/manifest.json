@@ -1,0 +1,24 @@
+{
+  "name": "Antigravity SSH Portal",
+  "short_name": "AntiSSH",
+  "description": "Premium Web SSH Client and Server Connection Manager",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0e122b",
+  "theme_color": "#0e122b",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icon.jpg",
+      "type": "image/jpeg",
+      "sizes": "512x512",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.jpg",
+      "type": "image/jpeg",
+      "sizes": "512x512",
+      "purpose": "maskable"
+    }
+  ]
+}
