@@ -13,7 +13,7 @@
   <!-- xterm.css -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
   <!-- Custom CSS -->
-  <link rel="stylesheet" href="style.css?v=9">
+  <link rel="stylesheet" href="style.css?v=10">
   <!-- PWA Manifest -->
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#0e122b">
@@ -43,8 +43,9 @@
           <i data-lucide="key-round"></i>
           <span>계정 정보 변경</span>
         </button>
-        <button id="logout-btn" class="btn btn-secondary btn-icon" title="로그아웃" style="color: var(--color-offline);">
+        <button id="logout-btn" class="btn btn-secondary btn-icon-text" title="로그아웃" style="color: var(--color-offline);">
           <i data-lucide="log-out"></i>
+          <span>로그아웃</span>
         </button>
       </div>
     </header>
@@ -70,6 +71,11 @@
       <div class="server-container" id="server-grid">
         <!-- Dynamic Groups and Cards Inserted Here -->
       </div>
+
+      <!-- Footer Credits -->
+      <footer class="app-footer">
+        <p>© 2026 Web-SSH Portal. Designed and Developed by <strong>SeongGi</strong> & <strong>Antigravity (AI)</strong> with ❤️</p>
+      </footer>
     </main>
 
     <!-- CRUD Modal -->
@@ -262,7 +268,7 @@
   <!-- xterm-addon-fit script -->
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <!-- Custom JS -->
-  <script src="app.js?v=9"></script>
+  <script src="app.js?v=10"></script>
   <!-- PWA Service Worker Registration -->
   <script>
     if ('serviceWorker' in navigator) {

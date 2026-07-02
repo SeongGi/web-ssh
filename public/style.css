@@ -1129,4 +1129,23 @@ select option {
   to { transform: rotate(360deg); }
 }
 
+/* App Footer Credits */
+.app-footer {
+  margin-top: 3rem;
+  padding: 1.5rem 0;
+  text-align: center;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.app-footer p {
+  margin: 0;
+}
+
+.app-footer strong {
+  color: var(--accent-color);
+  font-weight: 600;
+}
+
 
