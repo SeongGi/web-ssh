@@ -147,7 +147,8 @@ function parseDiagnosticOutput(stdout) {
 
     let cpuCores = '1';
     let cpuModel = 'Virtual CPU';
-    const cpuSection = sections.find(s => s.startsWith('CPU---'));
+    const cpuIdx = sections.findIndex(s => s.trim() === 'CPU');
+    const cpuSection = cpuIdx !== -1 ? sections[cpuIdx + 1] : '';
     if (cpuSection) {
       const lines = cpuSection.split('\n');
       cpuCores = lines[1] ? lines[1].trim() : '1';
@@ -160,7 +161,8 @@ function parseDiagnosticOutput(stdout) {
     let ramUsed = 'N/A';
     let ramFree = 'N/A';
     let ramGbVal = 0;
-    const memSection = sections.find(s => s.startsWith('MEM---'));
+    const memIdx = sections.findIndex(s => s.trim() === 'MEM');
+    const memSection = memIdx !== -1 ? sections[memIdx + 1] : '';
     if (memSection) {
       const memTotalMatch = memSection.match(/MemTotal:\s+(\d+)/);
       const memFreeMatch = memSection.match(/MemFree:\s+(\d+)/);
@@ -186,7 +188,8 @@ function parseDiagnosticOutput(stdout) {
     let diskUsed = 'N/A';
     let diskFree = 'N/A';
     let diskPercent = 'N/A';
-    const diskSection = sections.find(s => s.startsWith('DISK---'));
+    const diskIdx = sections.findIndex(s => s.trim() === 'DISK');
+    const diskSection = diskIdx !== -1 ? sections[diskIdx + 1] : '';
     if (diskSection) {
       const lines = diskSection.trim().split('\n');
       const rootDiskLine = lines.find(l => l.endsWith(' /') || l.includes(' % /') || l.includes(' / '));
@@ -203,9 +206,10 @@ function parseDiagnosticOutput(stdout) {
 
     let uptime = 'N/A';
     let loadAvg = 'N/A';
-    const uptimeSection = sections.find(s => s.startsWith('UPTIME---'));
+    const uptimeIdx = sections.findIndex(s => s.trim() === 'UPTIME');
+    const uptimeSection = uptimeIdx !== -1 ? sections[uptimeIdx + 1] : '';
     if (uptimeSection) {
-      const line = uptimeSection.replace('UPTIME---', '').trim();
+      const line = uptimeSection.trim();
       const uptimeMatch = line.match(/up\s+([^,]+(?:,\s+[^,]+)?),/);
       if (uptimeMatch) {
         uptime = uptimeMatch[1].trim();
