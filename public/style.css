@@ -947,6 +947,7 @@ select option {
   }
 
   .terminal-header {
+    height: auto;
     padding: 0.75rem;
     flex-direction: column;
     align-items: stretch;
@@ -995,13 +996,25 @@ select option {
     padding: 1.25rem 1rem;
   }
 
-  .card-actions {
+  .card-footer {
     flex-direction: column;
     align-items: stretch;
+    gap: 0.75rem;
+  }
+
+  .btn-connect {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .card-actions {
+    flex-direction: row;
+    width: 100%;
+    gap: 0.5rem;
   }
   
   .card-actions .btn {
-    width: 100%;
+    flex: 1;
     justify-content: center;
   }
 }
