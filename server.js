@@ -122,11 +122,132 @@ function readConnections() {
   }
 }
 
-function writeConnections(connections) {
+}
+
+// Helper to parse detailed system specs from raw SSH output
+function parseDiagnosticOutput(stdout) {
   try {
-    fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(connections, null, 2), 'utf-8');
+    const sections = stdout.split('---');
+    const osRelease = sections[0] || '';
+    
+    let osName = 'Linux';
+    const prettyNameMatch = osRelease.match(/PRETTY_NAME="([^"]+)"/);
+    if (prettyNameMatch) {
+      osName = prettyNameMatch[1];
+    } else {
+      const nameMatch = osRelease.match(/NAME="([^"]+)"/);
+      if (nameMatch) osName = nameMatch[1];
+    }
+
+    let cpuCores = '1';
+    let cpuModel = 'Virtual CPU';
+    const cpuSection = sections.find(s => s.startsWith('CPU---'));
+    if (cpuSection) {
+      const lines = cpuSection.split('\n');
+      cpuCores = lines[1] ? lines[1].trim() : '1';
+      if (lines[2]) {
+        cpuModel = lines[2].replace('model name\t:', '').replace('model name :', '').trim();
+      }
+    }
+
+    let ramTotal = 'N/A';
+    let ramUsed = 'N/A';
+    let ramFree = 'N/A';
+    let ramGbVal = 0;
+    const memSection = sections.find(s => s.startsWith('MEM---'));
+    if (memSection) {
+      const memTotalMatch = memSection.match(/MemTotal:\s+(\d+)/);
+      const memFreeMatch = memSection.match(/MemFree:\s+(\d+)/);
+      const memAvailableMatch = memSection.match(/MemAvailable:\s+(\d+)/);
+
+      if (memTotalMatch) {
+        const totalKb = parseInt(memTotalMatch[1], 10);
+        const freeKb = memAvailableMatch ? parseInt(memAvailableMatch[1], 10) : (memFreeMatch ? parseInt(memFreeMatch[1], 10) : 0);
+        const usedKb = totalKb - freeKb;
+        
+        ramGbVal = Math.round(totalKb / 1024 / 1024);
+        ramTotal = ramGbVal >= 1 ? `${ramGbVal}GB` : `${Math.round(totalKb / 1024)}MB`;
+        
+        const usedGbVal = usedKb / 1024 / 1024;
+        ramUsed = usedGbVal >= 1 ? `${usedGbVal.toFixed(1)}GB` : `${Math.round(usedKb / 1024)}MB`;
+        
+        const freeGbVal = freeKb / 1024 / 1024;
+        ramFree = freeGbVal >= 1 ? `${freeGbVal.toFixed(1)}GB` : `${Math.round(freeKb / 1024)}MB`;
+      }
+    }
+
+    let diskTotal = 'N/A';
+    let diskUsed = 'N/A';
+    let diskFree = 'N/A';
+    let diskPercent = 'N/A';
+    const diskSection = sections.find(s => s.startsWith('DISK---'));
+    if (diskSection) {
+      const lines = diskSection.trim().split('\n');
+      const rootDiskLine = lines.find(l => l.endsWith(' /') || l.includes(' % /') || l.includes(' / '));
+      if (rootDiskLine) {
+        const cols = rootDiskLine.trim().split(/\s+/);
+        if (cols.length >= 5) {
+          diskTotal = cols[1];
+          diskUsed = cols[2];
+          diskFree = cols[3];
+          diskPercent = cols[4];
+        }
+      }
+    }
+
+    let uptime = 'N/A';
+    let loadAvg = 'N/A';
+    const uptimeSection = sections.find(s => s.startsWith('UPTIME---'));
+    if (uptimeSection) {
+      const line = uptimeSection.replace('UPTIME---', '').trim();
+      const uptimeMatch = line.match(/up\s+([^,]+(?:,\s+[^,]+)?),/);
+      if (uptimeMatch) {
+        uptime = uptimeMatch[1].trim();
+      } else {
+        const uptimeAltMatch = line.match(/up\s+([^,]+),/);
+        if (uptimeAltMatch) uptime = uptimeAltMatch[1].trim();
+      }
+      
+      const loadMatch = line.match(/load average:\s+([^$]+)/);
+      if (loadMatch) {
+        loadAvg = loadMatch[1].trim();
+      }
+    }
+
+    const specParts = [];
+    specParts.push(`${cpuCores} Core CPU`);
+    specParts.push(`${ramTotal} RAM`);
+    specParts.push(`${diskTotal} Disk`);
+    const spec = specParts.join(' / ');
+
+    return {
+      success: true,
+      os: osName,
+      spec,
+      systemInfo: {
+        osName,
+        cpuModel,
+        cpuCores: `${cpuCores} Cores`,
+        ramTotal,
+        ramUsed,
+        ramFree,
+        diskTotal,
+        diskUsed,
+        diskFree,
+        diskPercent,
+        uptime,
+        loadAvg,
+        lastChecked: new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })
+      }
+    };
   } catch (e) {
-    console.error('Error writing connections file:', e);
+    console.error('Error parsing diagnostic output:', e);
+    return {
+      success: true,
+      os: 'Linux',
+      spec: 'Detected (parsing error)',
+      systemInfo: null
+    };
   }
 }
 
@@ -153,7 +274,8 @@ app.get('/api/servers', (req, res) => {
     description: conn.description || '',
     group: conn.group || 'General',
     hasKey: !!conn.privateKeyFile,
-    hasPassword: !!conn.password
+    hasPassword: !!conn.password,
+    systemInfo: conn.systemInfo || null
   }));
   res.json(sanitized);
 });
@@ -178,7 +300,8 @@ app.post('/api/servers', (req, res) => {
     spec: spec || '',
     description: description || '',
     group: group || 'General',
-    privateKeyFile: ''
+    privateKeyFile: '',
+    systemInfo: req.body.systemInfo || null
   };
 
   if (authType === 'key' && privateKey) {
@@ -220,6 +343,9 @@ app.put('/api/servers/:id', (req, res) => {
   existing.spec = spec !== undefined ? spec : existing.spec;
   existing.description = description !== undefined ? description : existing.description;
   existing.group = group !== undefined ? group : existing.group;
+  if (req.body.systemInfo !== undefined) {
+    existing.systemInfo = req.body.systemInfo;
+  }
 
   if (authType === 'key') {
     // If a new private key string is provided, overwrite or create the file
@@ -429,7 +555,70 @@ app.post('/api/servers/diagnose', (req, res) => {
   const sshClient = new Client();
 
   sshClient.on('ready', () => {
-    const command = 'cat /etc/os-release; echo "---CPU---"; nproc; echo "---MEM---"; cat /proc/meminfo; echo "---DISK---"; df -h /';
+    const command = 'cat /etc/os-release; echo "---CPU---"; nproc; grep "model name" /proc/cpuinfo | head -1; echo "---MEM---"; cat /proc/meminfo | grep -E "MemTotal|MemFree|MemAvailable"; echo "---DISK---"; df -h /; echo "---UPTIME---"; uptime;';
+    
+    sshClient.exec(command, (err, stream) => {
+      if (err) {
+        sshClient.end();
+        return res.json({ success: false, error: `Command execution failed: ${err.message}` });
+      }
+
+      let stdout = '';
+      stream.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      stream.on('close', () => {
+        sshClient.end();
+        const result = parseDiagnosticOutput(stdout);
+        res.json(result);
+      });
+    });
+  });
+
+  sshClient.on('error', (err) => {
+    res.json({ success: false, error: err.message });
+  });
+
+  sshClient.connect(sshConfig);
+});
+
+// Trigger deep credentials diagnostics & system specs scan for an existing server
+app.post('/api/servers/:id/diagnose', (req, res) => {
+  const { id } = req.params;
+  const connections = readConnections();
+  const conn = connections.find(c => c.id === id);
+
+  if (!conn) {
+    return res.status(404).json({ error: 'Server not found' });
+  }
+
+  const sshConfig = {
+    host: conn.host,
+    port: conn.port,
+    username: conn.username,
+    readyTimeout: 10000
+  };
+
+  if (conn.authType === 'key') {
+    if (!conn.privateKeyFile) {
+      return res.status(400).json({ error: 'Private Key file not found on server' });
+    }
+    const keyPath = path.join(KEYS_DIR, conn.privateKeyFile);
+    if (!fs.existsSync(keyPath)) {
+      return res.status(400).json({ error: 'Private Key file does not exist on disk' });
+    }
+    sshConfig.privateKey = fs.readFileSync(keyPath, 'utf-8');
+  } else if (conn.authType === 'password') {
+    sshConfig.password = conn.password;
+  } else {
+    return res.status(400).json({ error: 'Invalid authentication type' });
+  }
+
+  const sshClient = new Client();
+
+  sshClient.on('ready', () => {
+    const command = 'cat /etc/os-release; echo "---CPU---"; nproc; grep "model name" /proc/cpuinfo | head -1; echo "---MEM---"; cat /proc/meminfo | grep -E "MemTotal|MemFree|MemAvailable"; echo "---DISK---"; df -h /; echo "---UPTIME---"; uptime;';
     
     sshClient.exec(command, (err, stream) => {
       if (err) {
@@ -445,60 +634,17 @@ app.post('/api/servers/diagnose', (req, res) => {
       stream.on('close', () => {
         sshClient.end();
         
-        try {
-          const sections = stdout.split('---');
-          const osRelease = sections[0] || '';
+        const result = parseDiagnosticOutput(stdout);
+        if (result.success) {
+          // Update database
+          conn.os = result.os;
+          conn.spec = result.spec;
+          conn.systemInfo = result.systemInfo;
+          writeConnections(connections);
           
-          let os = 'Linux';
-          const prettyNameMatch = osRelease.match(/PRETTY_NAME="([^"]+)"/);
-          if (prettyNameMatch) {
-            os = prettyNameMatch[1];
-          } else {
-            const nameMatch = osRelease.match(/NAME="([^"]+)"/);
-            if (nameMatch) os = nameMatch[1];
-          }
-
-          let cpu = '1';
-          let mem = '';
-          let disk = '';
-
-          const cpuSection = sections.find(s => s.startsWith('CPU---'));
-          if (cpuSection) {
-            const lines = cpuSection.split('\n');
-            cpu = lines[1] ? lines[1].trim() : '1';
-          }
-
-          const memSection = sections.find(s => s.startsWith('MEM---'));
-          if (memSection) {
-            const memTotalMatch = memSection.match(/MemTotal:\s+(\d+)/);
-            if (memTotalMatch) {
-              const memKb = parseInt(memTotalMatch[1], 10);
-              const memGb = Math.round(memKb / 1024 / 1024);
-              mem = memGb >= 1 ? `${memGb}GB RAM` : `${Math.round(memKb / 1024)}MB RAM`;
-            }
-          }
-
-          const diskSection = sections.find(s => s.startsWith('DISK---'));
-          if (diskSection) {
-            const lines = diskSection.trim().split('\n');
-            const rootDiskLine = lines.find(l => l.endsWith(' /') || l.includes(' % /'));
-            if (rootDiskLine) {
-              const cols = rootDiskLine.trim().split(/\s+/);
-              if (cols[1]) {
-                disk = `${cols[1]}B`;
-              }
-            }
-          }
-
-          const specParts = [];
-          if (cpu) specParts.push(`${cpu} CPU`);
-          if (mem) specParts.push(mem);
-          if (disk) specParts.push(disk);
-          const spec = specParts.join(' / ');
-
-          res.json({ success: true, os, spec });
-        } catch (e) {
-          res.json({ success: true, os: 'Linux', spec: 'Detected successfully (parsed basic details)' });
+          res.json({ success: true, os: result.os, spec: result.spec, systemInfo: result.systemInfo });
+        } else {
+          res.json({ success: false, error: 'Failed to parse diagnostic output' });
         }
       });
     });

@@ -1,10 +1,10 @@
-const CACHE_NAME = 'web-ssh-v2';
+const CACHE_NAME = 'web-ssh-v3';
 const ASSETS = [
   '/',
   '/index.html',
   '/login.html',
-  '/style.css?v=8',
-  '/app.js?v=8',
+  '/style.css?v=9',
+  '/app.js?v=9',
   '/icon.jpg',
   'https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap',
   'https://unpkg.com/lucide@latest',
