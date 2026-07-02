@@ -122,6 +122,12 @@ function readConnections() {
   }
 }
 
+function writeConnections(connections) {
+  try {
+    fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(connections, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('Error writing connections file:', e);
+  }
 }
 
 // Helper to parse detailed system specs from raw SSH output
