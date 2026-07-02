@@ -213,6 +213,15 @@ function renderServerCards() {
 
         <div class="card-body">
           <p>${escapeHtml(server.description || '설명이 없습니다.')}</p>
+          <div class="specs-toggle-link" onclick="toggleSpecs('${server.id}', event)">
+            <i data-lucide="cpu" style="width:12px;height:12px"></i>
+            <span>시스템 사양 정보</span>
+            <i data-lucide="chevron-right" class="specs-chevron" id="specs-chevron-${server.id}" style="width:12px;height:12px"></i>
+          </div>
+        </div>
+
+        <div class="card-specs-drawer" id="specs-drawer-${server.id}">
+          ${systemInfoHtml(server)}
         </div>
 
         <div class="card-footer">
@@ -822,5 +831,146 @@ async function handleLogout() {
     console.warn('Logout request failed:', e);
   } finally {
     window.location.href = '/login.html';
+  }
+}
+
+// Toggle specifications drawer inside cards
+function toggleSpecs(serverId, event) {
+  if (event) event.stopPropagation();
+  const drawer = document.getElementById(`specs-drawer-${serverId}`);
+  const chevron = document.getElementById(`specs-chevron-${serverId}`);
+  if (drawer && chevron) {
+    const isActive = drawer.classList.toggle('active');
+    chevron.classList.toggle('rotated', isActive);
+  }
+}
+
+// Render HTML for server specifications detail drawer
+function systemInfoHtml(server) {
+  const info = server.systemInfo;
+  if (!info) {
+    return `
+      <div class="specs-empty">
+        <p>수집된 서버 사양 상세 정보가 없습니다.</p>
+        <button class="btn btn-secondary btn-xs btn-diagnose-card" onclick="diagnoseServer('${server.id}', event)">
+          <i data-lucide="refresh-cw" style="width:12px;height:12px"></i>
+          <span>지금 정보 가져오기</span>
+        </button>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="specs-grid">
+      <div class="specs-item">
+        <span class="specs-label">CPU 모델</span>
+        <span class="specs-value" title="${escapeHtml(info.cpuModel)}">${escapeHtml(info.cpuModel || 'N/A')}</span>
+      </div>
+      <div class="specs-item">
+        <span class="specs-label">코어 수</span>
+        <span class="specs-value">${escapeHtml(info.cpuCores || 'N/A')}</span>
+      </div>
+      <div class="specs-item">
+        <span class="specs-label">메모리 (RAM)</span>
+        <span class="specs-value">${escapeHtml(info.ramUsed || 'N/A')} / ${escapeHtml(info.ramTotal || 'N/A')}</span>
+      </div>
+      <div class="specs-item">
+        <span class="specs-label">디스크 (SSD/HDD)</span>
+        <span class="specs-value">${escapeHtml(info.diskUsed || 'N/A')} / ${escapeHtml(info.diskTotal || 'N/A')} (${escapeHtml(info.diskPercent || 'N/A')})</span>
+      </div>
+      <div class="specs-item">
+        <span class="specs-label">업타임 (Uptime)</span>
+        <span class="specs-value">${escapeHtml(info.uptime || 'N/A')}</span>
+      </div>
+      <div class="specs-item">
+        <span class="specs-label">평균 로드율 (1,5,15m)</span>
+        <span class="specs-value">${escapeHtml(info.loadAvg || 'N/A')}</span>
+      </div>
+      <div class="specs-item full-width" style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid rgba(255,255,255,0.05); padding-top:0.5rem; margin-top:0.25rem;">
+        <span class="specs-label" style="font-size:0.7rem;">마지막 업데이트: ${escapeHtml(info.lastChecked || 'N/A')}</span>
+        <button class="btn btn-secondary btn-xs btn-diagnose-card" onclick="diagnoseServer('${server.id}', event)">
+          <i data-lucide="refresh-cw" style="width:10px;height:10px"></i>
+          <span>정보 갱신</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+// Trigger diagnostic scan for an existing server
+async function diagnoseServer(serverId, event) {
+  if (event) event.stopPropagation();
+  
+  const card = document.getElementById(`server-card-${serverId}`);
+  const drawer = document.getElementById(`specs-drawer-${serverId}`);
+  const btn = event ? event.currentTarget : null;
+  
+  let originalBtnHtml = '';
+  if (btn) {
+    originalBtnHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i data-lucide="refresh-cw" class="spin" style="width:12px;height:12px"></i> <span>진단 중...</span>';
+    lucide.createIcons();
+  }
+
+  try {
+    const res = await fetch(`/api/servers/${serverId}/diagnose`, {
+      method: 'POST'
+    });
+    
+    const data = await res.json();
+    
+    if (res.ok && data.success) {
+      // Find server in local array and update it
+      const serverIdx = servers.findIndex(s => s.id === serverId);
+      if (serverIdx !== -1) {
+        servers[serverIdx].os = data.os;
+        servers[serverIdx].spec = data.spec;
+        servers[serverIdx].systemInfo = data.systemInfo;
+      }
+      
+      // Re-render only the drawer contents
+      if (drawer) {
+        drawer.innerHTML = systemInfoHtml(servers[serverIdx]);
+      }
+      
+      // Update badges in the card
+      if (card) {
+        const badgesContainer = card.querySelector('.card-badges');
+        if (badgesContainer) {
+          let badgesHtml = '';
+          if (data.os) badgesHtml += `<span class="badge badge-os">${data.os}</span>`;
+          if (data.spec) badgesHtml += `<span class="badge badge-spec">${data.spec}</span>`;
+          badgesHtml += `<span class="badge badge-auth">${servers[serverIdx].authType === 'key' ? 'Key File' : 'Password'}</span>`;
+          badgesContainer.innerHTML = badgesHtml;
+        }
+        
+        // Highlight card with a green success glow
+        const glow = '0 0 20px rgba(16, 185, 129, 0.5)';
+        card.style.boxShadow = glow;
+        card.style.borderColor = 'var(--color-online)';
+        setTimeout(() => {
+          card.style.boxShadow = '';
+          card.style.borderColor = '';
+        }, 2000);
+      }
+      
+      lucide.createIcons();
+    } else {
+      alert(`진단 실패: ${data.error || '알 수 없는 오류가 발생했습니다.'}`);
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = originalBtnHtml;
+        lucide.createIcons();
+      }
+    }
+  } catch (err) {
+    console.error('Server diagnose error:', err);
+    alert('진단 요청 처리 중 네트워크 오류가 발생했습니다.');
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = originalBtnHtml;
+      lucide.createIcons();
+    }
   }
 }

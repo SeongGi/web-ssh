@@ -1006,4 +1006,127 @@ select option {
   }
 }
 
+/* Specs Drawer inside Server Cards */
+.specs-toggle-link {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--accent-color);
+  cursor: pointer;
+  margin-top: 0.75rem;
+  user-select: none;
+  width: fit-content;
+  transition: opacity 0.2s;
+}
+
+.specs-toggle-link:hover {
+  opacity: 0.8;
+}
+
+.specs-chevron {
+  transition: transform 0.2s ease;
+}
+
+.specs-chevron.rotated {
+  transform: rotate(90deg);
+}
+
+.card-specs-drawer {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1), padding 0.3s, margin 0.3s;
+  background: rgba(255, 255, 255, 0.01);
+  border-radius: var(--border-radius-sm);
+  border: 1px solid transparent;
+}
+
+.card-specs-drawer.active {
+  max-height: 320px;
+  margin: 0.75rem 0 0.25rem 0;
+  padding: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.15);
+  overflow-y: auto;
+}
+
+.specs-empty {
+  text-align: center;
+  padding: 0.5rem 0;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.specs-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.5rem 0.75rem;
+}
+
+.specs-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.specs-item.full-width {
+  grid-column: span 2;
+}
+
+.specs-label {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.specs-value {
+  font-size: 0.75rem;
+  color: var(--text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Tiny Button for specifications diagnostics */
+.btn-xs {
+  height: 22px;
+  font-size: 0.68rem;
+  padding: 0 0.4rem;
+  gap: 0.2rem;
+  border-radius: var(--border-radius-sm);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  transition: var(--transition-smooth);
+}
+
+.btn-xs:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.btn-xs:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Animation for loading spinner */
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 
