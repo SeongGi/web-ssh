@@ -62,11 +62,32 @@ ssh-connect/
 ### 1. 프로젝트 요구사항
 - Docker 및 Docker Compose가 설치되어 있어야 합니다.
 
-### 2. 빌드 및 컨테이너 구동
-터미널을 열고 다음 명령어를 실행하여 서비스를 즉시 구동할 수 있습니다.
+### 2. 설치 및 컨테이너 구동 방법
 
+개발팀에서 미리 빌드하여 등록한 **GitHub Container Registry (GHCR)** 공식 이미지를 사용하면, 소스 코드를 클론(Clone)하거나 직접 빌드할 필요 없이 아래의 단순한 명령줄 하나로 즉시 서비스를 구동할 수 있습니다.
+
+#### 방법 A: Docker 단일 명령어로 실행 (가장 빠름 ⚡)
+터미널에 아래 명령어를 복사하여 실행합니다:
 ```bash
-# Docker Compose 빌드 및 백그라운드 실행
+docker run -d \
+  --name web-ssh \
+  -p 3000:3000 \
+  -v $(pwd)/data:/app/data \
+  --restart unless-stopped \
+  ghcr.io/seonggi/web-ssh:latest
+```
+
+#### 방법 B: Docker Compose 다운로드 후 실행 (추천 📂)
+설정 관리가 편리한 Docker Compose 방식으로 구동하려면 아래 1줄 명령어를 복사해 터미널에 붙여넣습니다:
+```bash
+curl -sSL https://raw.githubusercontent.com/SeongGi/web-ssh/main/docker-compose.prod.yml -o docker-compose.yml && docker compose up -d
+```
+
+#### 방법 C: 소스 코드에서 직접 빌드하여 실행 (개발용 🛠️)
+저장소를 클론한 뒤 직접 빌드하여 구동할 수도 있습니다:
+```bash
+git clone https://github.com/SeongGi/web-ssh.git
+cd web-ssh
 docker compose up -d --build
 ```
 

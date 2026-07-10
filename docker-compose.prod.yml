@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  web-ssh:
+    image: ghcr.io/seonggi/web-ssh:latest
+    container_name: web-ssh
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
