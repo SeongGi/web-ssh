@@ -4,10 +4,12 @@ node_modules/
 # Local Data Database & Keys (CRITICAL SECURITY)
 data/connections.json
 data/auth.json
+data/auth.json.*
 data/config.json
 data/keys/*
 !data/keys/.gitkeep
 ssh-export/
+ssh-servers.tar.gz
 
 # System & Logs
 .DS_Store

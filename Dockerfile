@@ -13,7 +13,6 @@ RUN npm ci --only=production
 COPY server.js ./
 COPY import-existing.js ./
 COPY public/ ./public/
-COPY ssh-export/ ./ssh-export/
 
 # Expose server port
 EXPOSE 3000
