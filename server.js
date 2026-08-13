@@ -4,24 +4,35 @@ const WebSocket = require('ws');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
-const cors = require('cors');
-const { v4: uuidv4 } = require('uuid');
 const { Client } = require('ssh2');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const KEYS_DIR = path.join(DATA_DIR, 'keys');
 const CONNECTIONS_FILE = path.join(DATA_DIR, 'connections.json');
 const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const PASSWORD_ITERATIONS = 210000;
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
 
 let authConfig = { username: 'admin', salt: '', hash: '' };
 let appConfig = { portalName: 'Web-SSH Portal' };
 
+fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+fs.mkdirSync(KEYS_DIR, { recursive: true, mode: 0o700 });
+fs.chmodSync(DATA_DIR, 0o700);
+fs.chmodSync(KEYS_DIR, 0o700);
+
+function writeJsonSecure(filePath, value) {
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  fs.chmodSync(filePath, 0o600);
+}
+
 // Initialize portal config
 if (!fs.existsSync(CONFIG_FILE)) {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(appConfig, null, 2), 'utf-8');
+  writeJsonSecure(CONFIG_FILE, appConfig);
 } else {
   try {
     appConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
@@ -30,27 +41,65 @@ if (!fs.existsSync(CONFIG_FILE)) {
   }
 }
 
-// Initialize auth configuration (admin / adminpassword)
+function hashPassword(password, salt, iterations = PASSWORD_ITERATIONS) {
+  return crypto.pbkdf2Sync(password, salt, iterations, 64, 'sha512').toString('hex');
+}
+
+function safeEqualHex(left, right) {
+  try {
+    const leftBuffer = Buffer.from(left, 'hex');
+    const rightBuffer = Buffer.from(right, 'hex');
+    return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+  } catch {
+    return false;
+  }
+}
+
+// Initialize auth configuration from an operator-supplied secret.
 if (!fs.existsSync(AUTH_FILE)) {
+  const initialPassword = process.env.ADMIN_PASSWORD;
+  if (!initialPassword || initialPassword.length < 12) {
+    throw new Error('First start requires ADMIN_PASSWORD with at least 12 characters.');
+  }
   const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.pbkdf2Sync('adminpassword', salt, 10000, 64, 'sha512').toString('hex');
-  authConfig = { username: 'admin', salt, hash };
-  fs.writeFileSync(AUTH_FILE, JSON.stringify(authConfig, null, 2), 'utf-8');
-  console.log('Default credentials initialized: admin / adminpassword');
+  const hash = hashPassword(initialPassword, salt);
+  authConfig = { username: process.env.ADMIN_USERNAME || 'admin', salt, hash, iterations: PASSWORD_ITERATIONS };
+  writeJsonSecure(AUTH_FILE, authConfig);
+  console.log('Administrator credentials initialized from environment.');
 } else {
   try {
     authConfig = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf-8'));
   } catch (e) {
-    console.error('Error reading auth file, regenerating defaults:', e);
+    throw new Error(`Cannot read authentication configuration: ${e.message}`);
+  }
+  if (!authConfig.username || !authConfig.salt || !authConfig.hash) {
+    throw new Error('Authentication configuration is incomplete; restore it or remove it and set ADMIN_PASSWORD.');
+  }
+  const storedIterations = authConfig.iterations || 10000;
+  const isLegacyDefault = safeEqualHex(
+    hashPassword('adminpassword', authConfig.salt, storedIterations),
+    authConfig.hash
+  );
+  if (isLegacyDefault) {
+    const replacement = process.env.ADMIN_PASSWORD;
+    if (!replacement || replacement.length < 12 || replacement === 'adminpassword') {
+      throw new Error('Insecure legacy default password detected. Set a new ADMIN_PASSWORD (12+ characters) to rotate it.');
+    }
     const salt = crypto.randomBytes(16).toString('hex');
-    const hash = crypto.pbkdf2Sync('adminpassword', salt, 10000, 64, 'sha512').toString('hex');
-    authConfig = { username: 'admin', salt, hash };
-    fs.writeFileSync(AUTH_FILE, JSON.stringify(authConfig, null, 2), 'utf-8');
+    authConfig = {
+      username: process.env.ADMIN_USERNAME || authConfig.username,
+      salt,
+      hash: hashPassword(replacement, salt),
+      iterations: PASSWORD_ITERATIONS
+    };
+    writeJsonSecure(AUTH_FILE, authConfig);
+    console.log('Insecure legacy administrator password was rotated.');
   }
 }
 
 // In-memory active session tokens
-const activeSessions = new Set();
+const activeSessions = new Map();
+const loginAttempts = new Map();
 
 // Native Cookie Parser Helper
 function getCookie(req, name) {
@@ -77,7 +126,8 @@ function requireAuth(req, res, next) {
   // Extract and verify session token
   const token = getCookie(req, 'session_token');
   if (token && activeSessions.has(token)) {
-    return next();
+    if (activeSessions.get(token) > Date.now()) return next();
+    activeSessions.delete(token);
   }
 
   // Handle unauthorized requests
@@ -88,16 +138,9 @@ function requireAuth(req, res, next) {
   }
 }
 
-// Ensure data and keys directory exist
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR);
-}
-if (!fs.existsSync(KEYS_DIR)) {
-  fs.mkdirSync(KEYS_DIR);
-}
-
-// Auto-run import if config doesn't exist but import files exist
-if (!fs.existsSync(CONNECTIONS_FILE)) {
+// Auto-run import only when an external import directory was explicitly configured.
+const SSH_IMPORT_DIR = process.env.SSH_IMPORT_DIR;
+if (!fs.existsSync(CONNECTIONS_FILE) && SSH_IMPORT_DIR && fs.existsSync(path.join(SSH_IMPORT_DIR, 'config'))) {
   const importScriptPath = path.join(__dirname, 'import-existing.js');
   if (fs.existsSync(importScriptPath)) {
     console.log('connections.json not found. Running automatic import...');
@@ -124,7 +167,7 @@ function readConnections() {
 
 function writeConnections(connections) {
   try {
-    fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(connections, null, 2), 'utf-8');
+    writeJsonSecure(CONNECTIONS_FILE, connections);
   } catch (e) {
     console.error('Error writing connections file:', e);
   }
@@ -262,8 +305,16 @@ function parseDiagnosticOutput(stdout) {
 }
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:");
+  next();
+});
+app.use(express.json({ limit: '64kb' }));
 app.use(requireAuth); // Protect static files and API routes
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -298,7 +349,7 @@ app.post('/api/servers', (req, res) => {
   }
 
   const connections = readConnections();
-  const id = uuidv4();
+  const id = crypto.randomUUID();
   const newConn = {
     id,
     name,
@@ -451,29 +502,6 @@ app.get('/api/servers/:id/ping', (req, res) => {
   });
 
   socket.connect(conn.port, conn.host);
-});
-
-// Get raw private key for editing
-app.get('/api/servers/:id/key', (req, res) => {
-  const { id } = req.params;
-  const connections = readConnections();
-  const conn = connections.find(c => c.id === id);
-
-  if (!conn) {
-    return res.status(404).json({ error: 'Server not found' });
-  }
-
-  if (conn.authType !== 'key' || !conn.privateKeyFile) {
-    return res.json({ privateKey: '' });
-  }
-
-  const keyPath = path.join(KEYS_DIR, conn.privateKeyFile);
-  if (fs.existsSync(keyPath)) {
-    const keyContent = fs.readFileSync(keyPath, 'utf-8');
-    res.json({ privateKey: keyContent });
-  } else {
-    res.status(404).json({ error: 'Key file not found' });
-  }
 });
 
 // Basic Port & SSH Banner Scan
@@ -672,25 +700,43 @@ app.post('/api/servers/:id/diagnose', (req, res) => {
 // Login Route
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
+  const attemptKey = req.socket.remoteAddress || 'unknown';
+  const attempt = loginAttempts.get(attemptKey) || { count: 0, resetAt: Date.now() + 15 * 60 * 1000 };
+  if (attempt.resetAt <= Date.now()) {
+    attempt.count = 0;
+    attempt.resetAt = Date.now() + 15 * 60 * 1000;
+  }
+  if (attempt.count >= 10) {
+    res.setHeader('Retry-After', Math.ceil((attempt.resetAt - Date.now()) / 1000));
+    return res.status(429).json({ error: 'Too many login attempts. Try again later.' });
+  }
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password are required.' });
   }
 
-  if (username !== authConfig.username) {
-    return res.status(400).json({ error: 'Invalid username or password.' });
+  const iterations = authConfig.iterations || 10000;
+  const hash = hashPassword(password, authConfig.salt, iterations);
+  if (username !== authConfig.username || !safeEqualHex(hash, authConfig.hash)) {
+    attempt.count += 1;
+    loginAttempts.set(attemptKey, attempt);
+    return res.status(401).json({ error: 'Invalid username or password.' });
   }
+  loginAttempts.delete(attemptKey);
 
-  const hash = crypto.pbkdf2Sync(password, authConfig.salt, 10000, 64, 'sha512').toString('hex');
-  if (hash !== authConfig.hash) {
-    return res.status(400).json({ error: 'Invalid username or password.' });
+  // Upgrade hashes created by older releases after a successful login.
+  if (iterations < PASSWORD_ITERATIONS) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    authConfig = { ...authConfig, salt, hash: hashPassword(password, salt), iterations: PASSWORD_ITERATIONS };
+    writeJsonSecure(AUTH_FILE, authConfig);
   }
 
   // Generate secure random session token
   const token = crypto.randomBytes(32).toString('hex');
-  activeSessions.add(token);
+  activeSessions.set(token, Date.now() + SESSION_TTL_MS);
 
   // Set HTTP-Only Cookie
-  res.setHeader('Set-Cookie', `session_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${7 * 24 * 60 * 60}`);
+  const secure = COOKIE_SECURE ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `session_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure}`);
   res.json({ success: true });
 });
 
@@ -722,27 +768,32 @@ app.post('/api/update-profile', (req, res) => {
     return res.status(400).json({ error: 'Current password and username are required.' });
   }
 
-  const currentHash = crypto.pbkdf2Sync(currentPassword, authConfig.salt, 10000, 64, 'sha512').toString('hex');
-  if (currentHash !== authConfig.hash) {
+  const currentHash = hashPassword(currentPassword, authConfig.salt, authConfig.iterations || 10000);
+  if (!safeEqualHex(currentHash, authConfig.hash)) {
     return res.status(400).json({ error: 'Current password does not match.' });
   }
 
   authConfig.username = newUsername;
 
   if (newPassword) {
+    if (newPassword.length < 12) {
+      return res.status(400).json({ error: 'New password must be at least 12 characters.' });
+    }
     const newSalt = crypto.randomBytes(16).toString('hex');
-    const newHash = crypto.pbkdf2Sync(newPassword, newSalt, 10000, 64, 'sha512').toString('hex');
+    const newHash = hashPassword(newPassword, newSalt);
     authConfig.salt = newSalt;
     authConfig.hash = newHash;
+    authConfig.iterations = PASSWORD_ITERATIONS;
   }
 
   // Update Portal Name if provided
   if (portalName) {
     appConfig.portalName = portalName;
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(appConfig, null, 2), 'utf-8');
+    writeJsonSecure(CONFIG_FILE, appConfig);
   }
 
-  fs.writeFileSync(AUTH_FILE, JSON.stringify(authConfig, null, 2), 'utf-8');
+  writeJsonSecure(AUTH_FILE, authConfig);
+  activeSessions.clear();
 
   res.json({ success: true });
 });
@@ -752,6 +803,20 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/ssh' });
 
 wss.on('connection', (ws, req) => {
+  const requestOrigin = req.headers.origin;
+  if (!requestOrigin) {
+    ws.close(1008, 'Origin header required');
+    return;
+  }
+  try {
+    if (new URL(requestOrigin).host !== req.headers.host) {
+      ws.close(1008, 'Cross-origin WebSocket rejected');
+      return;
+    }
+  } catch {
+    ws.close(1008, 'Invalid Origin header');
+    return;
+  }
   const urlParams = new URL(req.url, `http://${req.headers.host}`);
   const id = urlParams.searchParams.get('id');
   const termCols = parseInt(urlParams.searchParams.get('cols'), 10) || 80;
@@ -762,7 +827,7 @@ wss.on('connection', (ws, req) => {
   const tokenMatch = cookies.match(/session_token=([^;]+)/);
   const token = tokenMatch ? tokenMatch[1] : null;
 
-  if (!token || !activeSessions.has(token)) {
+  if (!token || !activeSessions.has(token) || activeSessions.get(token) <= Date.now()) {
     ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized WebSocket session.' }));
     ws.close();
     return;

@@ -389,25 +389,10 @@ async function handleFormSubmit(e) {
 }
 
 // Edit Server Trigger
-async function editServer(id) {
+function editServer(id) {
   const server = servers.find(s => s.id === id);
   if (!server) return;
-
-  // If auth is key, fetch the key content first
-  if (server.authType === 'key') {
-    try {
-      const res = await fetch(`/api/servers/${id}/key`);
-      const keyData = await res.json();
-      server.privateKey = keyData.privateKey;
-    } catch (e) {
-      console.warn('Failed to load existing private key string:', e);
-    }
-  }
-  
   openModal(server);
-  if (server.privateKey) {
-    document.getElementById('server-privateKey').value = server.privateKey;
-  }
 }
 
 // Delete Server Profile

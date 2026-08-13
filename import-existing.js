@@ -1,20 +1,22 @@
 const fs = require('fs');
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const KEYS_DIR = path.join(DATA_DIR, 'keys');
-const SSH_EXPORT_DIR = path.join(__dirname, 'ssh-export');
+const SSH_EXPORT_DIR = process.env.SSH_IMPORT_DIR && path.resolve(process.env.SSH_IMPORT_DIR);
+if (!SSH_EXPORT_DIR) {
+  console.error('Error: SSH_IMPORT_DIR must point to an external SSH export directory.');
+  process.exit(1);
+}
 const CONFIG_FILE = path.join(SSH_EXPORT_DIR, 'config');
 const README_FILE = path.join(SSH_EXPORT_DIR, 'README.md');
 
 // Ensure directories exist
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR);
-}
-if (!fs.existsSync(KEYS_DIR)) {
-  fs.mkdirSync(KEYS_DIR);
-}
+fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+fs.mkdirSync(KEYS_DIR, { recursive: true, mode: 0o700 });
+fs.chmodSync(DATA_DIR, 0o700);
+fs.chmodSync(KEYS_DIR, 0o700);
 
 function parseSSHConfig(configContent) {
   const servers = [];
@@ -34,7 +36,7 @@ function parseSSHConfig(configContent) {
         servers.push(currentServer);
       }
       currentServer = {
-        id: uuidv4(),
+        id: crypto.randomUUID(),
         name: value,
         host: '',
         port: 22,
@@ -137,7 +139,8 @@ function run() {
   });
 
   const connectionsJsonPath = path.join(DATA_DIR, 'connections.json');
-  fs.writeFileSync(connectionsJsonPath, JSON.stringify(importedServers, null, 2), 'utf-8');
+  fs.writeFileSync(connectionsJsonPath, JSON.stringify(importedServers, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  fs.chmodSync(connectionsJsonPath, 0o600);
   console.log(`Successfully imported ${importedServers.length} servers to ${connectionsJsonPath}`);
 }
 

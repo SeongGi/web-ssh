@@ -1,6 +1,12 @@
 node_modules
 npm-debug.log
 data/
+ssh-export/
+ssh-servers.tar.gz
+*.pem
+*.key
+.env
+.env.*
 .git
 .agents
 .DS_Store

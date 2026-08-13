@@ -23,7 +23,7 @@
    - 서버를 프로젝트/클라우드별로 그룹화하고, 접기/펴기 상태를 브라우저에 저장합니다.
 
 5. 세션 및 보안
-   - 비밀번호는 PBKDF2 SHA-512 (10,000 iterations) + salt로 저장합니다.
+   - 관리자 비밀번호는 PBKDF2 SHA-512 (210,000 iterations) + salt로 저장합니다.
    - HttpOnly, SameSite=Strict 세션 쿠키로 API와 WebSocket 채널을 보호합니다.
    - 대시보드에서 포털 이름, 관리자 ID, 비밀번호를 언제든지 변경할 수 있습니다.
 
@@ -33,11 +33,6 @@
 
 ```text
 ssh-connect/
-├── data/                 # 볼륨 데이터 저장소 (Docker 마운트 대상)
-│   ├── connections.json  # 등록된 SSH 커넥션 데이터베이스
-│   ├── auth.json         # 관리자 계정 정보 및 PBKDF2 해시
-│   ├── config.json       # 포털 이름 설정 파일
-│   └── keys/             # 서버별 Private Key (.pem) 보관소
 ├── public/               # 웹 프론트엔드 정적 파일
 │   ├── index.html        # 대시보드
 │   ├── login.html        # 로그인 화면
@@ -65,7 +60,9 @@ Docker만 있으면 됩니다.
 docker run -d \
   --name web-ssh \
   -p 3000:3000 \
-  -v $(pwd)/data:/app/data \
+  -e DATA_DIR=/app/data \
+  -e ADMIN_PASSWORD='충분히-긴-임의의-비밀번호' \
+  -v web-ssh-data:/app/data \
   --restart unless-stopped \
   ghcr.io/seonggi/web-ssh:latest
 ```
@@ -87,17 +84,34 @@ docker compose up -d --build
 ### 초기 접속 정보
 
 - 접속 URL: `http://localhost:3000`
-- 초기 ID: `admin`
-- 초기 비밀번호: `adminpassword`
+- 초기 ID: `ADMIN_USERNAME` 환경변수 값 (기본값 `admin`)
+- 초기 비밀번호: 최초 실행 전에 12자 이상의 `ADMIN_PASSWORD` 환경변수를 반드시 설정해야 합니다.
 
-> 처음 로그인 후 대시보드 우측 상단의 계정 설정에서 ID와 비밀번호를 반드시 변경해 주세요.
+```bash
+export ADMIN_PASSWORD='충분히-긴-임의의-비밀번호'
+docker compose up -d
+```
+
+HTTPS 리버스 프록시를 사용하는 운영 환경에서는 `COOKIE_SECURE=true`도 설정하세요.
 
 ---
 
 ## 백업 및 마이그레이션
 
-서버 목록, 키 파일 등 모든 데이터는 `./data/` 폴더에 저장됩니다.
-새 서버로 이전할 때 `./data` 디렉토리를 통째로 복사하면 그대로 옮겨집니다.
+서버 목록, 인증 정보, SSH 개인키는 Git 저장소가 아닌 Docker named volume에 저장됩니다.
+Compose 배포는 `web-ssh-data`, 로컬 빌드는 `ssh-connect-data` 볼륨을 사용합니다.
+
+기존 `./data`를 named volume로 옮길 때는 컨테이너를 정지한 후 다음처럼 복사합니다.
+
+```bash
+docker volume create web-ssh-data
+docker run --rm \
+  -v "$(pwd)/data:/source:ro" \
+  -v web-ssh-data:/target \
+  alpine sh -c 'cp -a /source/. /target/ && chmod -R go-rwx /target'
+```
+
+백업도 저장소 폴더가 아닌 별도 보안 경로에 만들고 Git에는 추가하지 마세요.
 
 ---
 

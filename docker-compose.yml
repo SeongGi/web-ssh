@@ -1,11 +1,17 @@
-version: '3.8'
-
 services:
   ssh-connect:
     build: .
     container_name: ssh-connect
     ports:
       - "3000:3000"
+    environment:
+      DATA_DIR: /app/data
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD to at least 12 characters}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     volumes:
-      - ./data:/app/data
+      - ssh-connect-data:/app/data
     restart: unless-stopped
+
+volumes:
+  ssh-connect-data:
