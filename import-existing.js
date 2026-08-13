@@ -1,8 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
 
-const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(os.homedir(), '.local', 'share', 'web-ssh'));
 const KEYS_DIR = path.join(DATA_DIR, 'keys');
 const SSH_EXPORT_DIR = process.env.SSH_IMPORT_DIR && path.resolve(process.env.SSH_IMPORT_DIR);
 if (!SSH_EXPORT_DIR) {

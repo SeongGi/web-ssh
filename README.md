@@ -100,6 +100,8 @@ HTTPS 리버스 프록시를 사용하는 운영 환경에서는 `COOKIE_SECURE=
 
 서버 목록, 인증 정보, SSH 개인키는 Git 저장소가 아닌 Docker named volume에 저장됩니다.
 Compose 배포는 `web-ssh-data`, 로컬 빌드는 `ssh-connect-data` 볼륨을 사용합니다.
+Node.js로 직접 실행할 때는 기본적으로 `~/.local/share/web-ssh`에 저장되며,
+필요하면 `DATA_DIR` 환경변수로 저장소 밖의 다른 보안 경로를 지정할 수 있습니다.
 
 기존 `./data`를 named volume로 옮길 때는 컨테이너를 정지한 후 다음처럼 복사합니다.
 

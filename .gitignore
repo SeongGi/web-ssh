@@ -22,3 +22,6 @@ yarn-debug.log*
 yarn-error.log*
 .idea/
 .vscode/
+
+# Local screenshots may contain server addresses and account names
+screen_*.png

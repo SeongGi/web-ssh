@@ -3,12 +3,13 @@ const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const net = require('net');
 const { Client } = require('ssh2');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
-const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(os.homedir(), '.local', 'share', 'web-ssh'));
 const KEYS_DIR = path.join(DATA_DIR, 'keys');
 const CONNECTIONS_FILE = path.join(DATA_DIR, 'connections.json');
 const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
