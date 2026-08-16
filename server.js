@@ -18,6 +18,41 @@ const PASSWORD_ITERATIONS = 210000;
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
 
+// Google OAuth 2.0 / OpenID Connect single sign-on (optional)
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || '';
+const GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
+const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
+const GOOGLE_JWKS_ENDPOINT = 'https://www.googleapis.com/oauth2/v3/certs';
+const GOOGLE_ISSUERS = new Set(['https://accounts.google.com', 'accounts.google.com']);
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const OAUTH_COOKIE_PATH = '/api/auth/google';
+
+function parseAllowList(value) {
+  return (value || '')
+    .split(',')
+    .map(entry => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+const GOOGLE_ALLOWED_EMAILS = new Set(parseAllowList(process.env.GOOGLE_ALLOWED_EMAILS));
+const GOOGLE_ALLOWED_DOMAINS = new Set(parseAllowList(process.env.GOOGLE_ALLOWED_DOMAINS).map(d => d.replace(/^@/, '')));
+
+// Google sign-in stays off unless an explicit allow list exists. Without one, every
+// Google account on the internet would get a shell on every managed server.
+const googleClientConfigured = Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET);
+const googleAllowListConfigured = GOOGLE_ALLOWED_EMAILS.size > 0 || GOOGLE_ALLOWED_DOMAINS.size > 0;
+const GOOGLE_LOGIN_ENABLED = googleClientConfigured && googleAllowListConfigured;
+
+if (!googleClientConfigured && (GOOGLE_CLIENT_ID || GOOGLE_CLIENT_SECRET)) {
+  console.warn('Google login disabled: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must both be set.');
+} else if (googleClientConfigured && !googleAllowListConfigured) {
+  console.warn('Google login disabled: set GOOGLE_ALLOWED_EMAILS or GOOGLE_ALLOWED_DOMAINS to name the accounts that may sign in.');
+} else if (GOOGLE_LOGIN_ENABLED) {
+  console.log('Google login enabled.');
+}
+
 let authConfig = { username: 'admin', salt: '', hash: '' };
 let appConfig = { portalName: 'Web-SSH Portal' };
 
@@ -98,7 +133,7 @@ if (!fs.existsSync(AUTH_FILE)) {
   }
 }
 
-// In-memory active session tokens
+// In-memory active session tokens: token -> { expiresAt, user }
 const activeSessions = new Map();
 const loginAttempts = new Map();
 
@@ -114,21 +149,42 @@ function getCookie(req, name) {
   return null;
 }
 
+// Return the live session for a token, dropping it once it has expired.
+function getSession(token) {
+  if (!token) return null;
+  const session = activeSessions.get(token);
+  if (!session) return null;
+  if (session.expiresAt <= Date.now()) {
+    activeSessions.delete(token);
+    return null;
+  }
+  return session;
+}
+
+function createSession(user) {
+  const token = crypto.randomBytes(32).toString('hex');
+  activeSessions.set(token, { expiresAt: Date.now() + SESSION_TTL_MS, user });
+  return token;
+}
+
+function sessionCookie(token) {
+  const secure = COOKIE_SECURE ? '; Secure' : '';
+  return `session_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure}`;
+}
+
 // Authentication Middleware
 function requireAuth(req, res, next) {
   const path = req.path;
-  
+
   // Publicly accessible paths
   const publicRoutes = ['/login.html', '/style.css', '/icon.jpg', '/manifest.json', '/sw.js', '/api/config'];
-  if (publicRoutes.includes(path) || path.startsWith('/api/login')) {
+  if (publicRoutes.includes(path) || path.startsWith('/api/login') || path.startsWith('/api/auth/google')) {
     return next();
   }
 
   // Extract and verify session token
-  const token = getCookie(req, 'session_token');
-  if (token && activeSessions.has(token)) {
-    if (activeSessions.get(token) > Date.now()) return next();
-    activeSessions.delete(token);
+  if (getSession(getCookie(req, 'session_token'))) {
+    return next();
   }
 
   // Handle unauthorized requests
@@ -137,6 +193,105 @@ function requireAuth(req, res, next) {
   } else {
     return res.status(401).json({ error: 'Unauthorized' });
   }
+}
+
+// Google OAuth helpers
+
+// Pending authorization requests: state -> { nonce, codeVerifier, redirectUri, expiresAt }
+const pendingOAuthStates = new Map();
+let googleJwksCache = { keys: [], expiresAt: 0 };
+
+function base64UrlEncode(buffer) {
+  return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlDecode(value) {
+  return Buffer.from(String(value).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+}
+
+function prunePendingOAuthStates() {
+  const now = Date.now();
+  for (const [state, entry] of pendingOAuthStates) {
+    if (entry.expiresAt <= now) pendingOAuthStates.delete(state);
+  }
+}
+
+function oauthStateCookie(state) {
+  const secure = COOKIE_SECURE ? '; Secure' : '';
+  const maxAge = state ? OAUTH_STATE_TTL_MS / 1000 : 0;
+  // SameSite=Lax so the cookie survives the top-level redirect back from Google.
+  return `oauth_state=${state || ''}; Path=${OAUTH_COOKIE_PATH}; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`;
+}
+
+// The redirect URI must match the one registered in the Google Cloud console.
+function resolveGoogleRedirectUri(req) {
+  if (GOOGLE_REDIRECT_URI) return GOOGLE_REDIRECT_URI;
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+  const proto = forwardedProto || (COOKIE_SECURE ? 'https' : 'http');
+  const host = forwardedHost || req.headers.host || `localhost:${PORT}`;
+  return `${proto}://${host}${OAUTH_COOKIE_PATH}/callback`;
+}
+
+async function fetchGoogleJwks(forceRefresh = false) {
+  if (!forceRefresh && googleJwksCache.expiresAt > Date.now()) return googleJwksCache.keys;
+  const response = await fetch(GOOGLE_JWKS_ENDPOINT);
+  if (!response.ok) throw new Error(`Google JWKS request failed with HTTP ${response.status}.`);
+  const body = await response.json();
+  const maxAge = /max-age=(\d+)/i.exec(response.headers.get('cache-control') || '');
+  const ttlSeconds = maxAge ? Number(maxAge[1]) : 3600;
+  googleJwksCache = {
+    keys: Array.isArray(body.keys) ? body.keys : [],
+    expiresAt: Date.now() + ttlSeconds * 1000
+  };
+  return googleJwksCache.keys;
+}
+
+async function findGoogleSigningKey(kid) {
+  const cached = (await fetchGoogleJwks()).find(key => key.kid === kid && key.kty === 'RSA');
+  if (cached) return cached;
+  // Google rotates signing keys, so refresh once before giving up.
+  return (await fetchGoogleJwks(true)).find(key => key.kid === kid && key.kty === 'RSA') || null;
+}
+
+async function verifyGoogleIdToken(idToken, expectedNonce) {
+  const segments = String(idToken || '').split('.');
+  if (segments.length !== 3) throw new Error('Malformed ID token.');
+
+  const [encodedHeader, encodedPayload, encodedSignature] = segments;
+  const header = JSON.parse(base64UrlDecode(encodedHeader).toString('utf-8'));
+  if (header.alg !== 'RS256') throw new Error(`Unsupported ID token algorithm: ${header.alg}`);
+
+  const jwk = await findGoogleSigningKey(header.kid);
+  if (!jwk) throw new Error('No matching Google signing key for this ID token.');
+
+  const publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+  const signedInput = Buffer.from(`${encodedHeader}.${encodedPayload}`);
+  if (!crypto.verify('RSA-SHA256', signedInput, publicKey, base64UrlDecode(encodedSignature))) {
+    throw new Error('ID token signature verification failed.');
+  }
+
+  const payload = JSON.parse(base64UrlDecode(encodedPayload).toString('utf-8'));
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const clockSkewSeconds = 60;
+  if (!GOOGLE_ISSUERS.has(payload.iss)) throw new Error('Unexpected ID token issuer.');
+  if (payload.aud !== GOOGLE_CLIENT_ID) throw new Error('ID token was issued for a different client.');
+  if (typeof payload.exp !== 'number' || payload.exp + clockSkewSeconds < nowSeconds) {
+    throw new Error('ID token has expired.');
+  }
+  if (typeof payload.iat === 'number' && payload.iat - clockSkewSeconds > nowSeconds) {
+    throw new Error('ID token is not valid yet.');
+  }
+  if (payload.nonce !== expectedNonce) throw new Error('ID token nonce mismatch.');
+  return payload;
+}
+
+function isGoogleAccountAllowed(payload) {
+  if (payload.email_verified !== true && payload.email_verified !== 'true') return false;
+  const email = String(payload.email || '').toLowerCase();
+  if (!email.includes('@')) return false;
+  if (GOOGLE_ALLOWED_EMAILS.has(email)) return true;
+  return GOOGLE_ALLOWED_DOMAINS.has(email.slice(email.lastIndexOf('@') + 1));
 }
 
 // Auto-run import only when an external import directory was explicitly configured.
@@ -731,14 +886,111 @@ app.post('/api/login', (req, res) => {
     writeJsonSecure(AUTH_FILE, authConfig);
   }
 
-  // Generate secure random session token
-  const token = crypto.randomBytes(32).toString('hex');
-  activeSessions.set(token, Date.now() + SESSION_TTL_MS);
-
-  // Set HTTP-Only Cookie
-  const secure = COOKIE_SECURE ? '; Secure' : '';
-  res.setHeader('Set-Cookie', `session_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure}`);
+  // Generate secure random session token and set the HTTP-Only cookie
+  const token = createSession({ provider: 'local', name: authConfig.username });
+  res.setHeader('Set-Cookie', sessionCookie(token));
   res.json({ success: true });
+});
+
+// Google Login: start the authorization code flow
+app.get('/api/auth/google', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!GOOGLE_LOGIN_ENABLED) {
+    return res.redirect('/login.html?error=google_disabled');
+  }
+
+  prunePendingOAuthStates();
+  const state = base64UrlEncode(crypto.randomBytes(32));
+  const nonce = base64UrlEncode(crypto.randomBytes(32));
+  const codeVerifier = base64UrlEncode(crypto.randomBytes(32));
+  const codeChallenge = base64UrlEncode(crypto.createHash('sha256').update(codeVerifier).digest());
+  const redirectUri = resolveGoogleRedirectUri(req);
+
+  pendingOAuthStates.set(state, { nonce, codeVerifier, redirectUri, expiresAt: Date.now() + OAUTH_STATE_TTL_MS });
+  res.setHeader('Set-Cookie', oauthStateCookie(state));
+
+  const authorizeUrl = new URL(GOOGLE_AUTH_ENDPOINT);
+  authorizeUrl.searchParams.set('client_id', GOOGLE_CLIENT_ID);
+  authorizeUrl.searchParams.set('redirect_uri', redirectUri);
+  authorizeUrl.searchParams.set('response_type', 'code');
+  authorizeUrl.searchParams.set('scope', 'openid email profile');
+  authorizeUrl.searchParams.set('state', state);
+  authorizeUrl.searchParams.set('nonce', nonce);
+  authorizeUrl.searchParams.set('code_challenge', codeChallenge);
+  authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+  authorizeUrl.searchParams.set('prompt', 'select_account');
+  res.redirect(authorizeUrl.toString());
+});
+
+// Google Login: exchange the authorization code and open a portal session
+app.get('/api/auth/google/callback', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+
+  const fail = (code) => {
+    res.setHeader('Set-Cookie', oauthStateCookie(''));
+    res.redirect(`/login.html?error=${code}`);
+  };
+
+  if (!GOOGLE_LOGIN_ENABLED) return fail('google_disabled');
+  if (req.query.error) return fail('google_denied');
+
+  prunePendingOAuthStates();
+  const code = typeof req.query.code === 'string' ? req.query.code : '';
+  const state = typeof req.query.state === 'string' ? req.query.state : '';
+  const cookieState = getCookie(req, 'oauth_state');
+  if (!code || !state || !cookieState || state !== cookieState) return fail('google_state');
+
+  const pending = pendingOAuthStates.get(state);
+  pendingOAuthStates.delete(state);
+  if (!pending) return fail('google_state');
+
+  try {
+    const tokenResponse = await fetch(GOOGLE_TOKEN_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: GOOGLE_CLIENT_ID,
+        client_secret: GOOGLE_CLIENT_SECRET,
+        redirect_uri: pending.redirectUri,
+        grant_type: 'authorization_code',
+        code_verifier: pending.codeVerifier
+      })
+    });
+    if (!tokenResponse.ok) {
+      console.error(`Google token exchange failed with HTTP ${tokenResponse.status}.`);
+      return fail('google_token');
+    }
+
+    const tokens = await tokenResponse.json();
+    const payload = await verifyGoogleIdToken(tokens.id_token, pending.nonce);
+    if (!isGoogleAccountAllowed(payload)) {
+      console.warn(`Google login rejected for ${payload.email || 'unknown account'}: not on the allow list.`);
+      return fail('google_forbidden');
+    }
+
+    const email = String(payload.email).toLowerCase();
+    const token = createSession({ provider: 'google', email, name: payload.name || email });
+    res.setHeader('Set-Cookie', [oauthStateCookie(''), sessionCookie(token)]);
+    console.log(`Google login succeeded for ${email}.`);
+
+    // The SameSite=Strict session cookie would be withheld on a 302 that is still part
+    // of the cross-site redirect chain from Google, so bounce through our own document.
+    res.type('html').send(`<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="refresh" content="0;url=/">
+  <title>Signing in...</title>
+</head>
+<body>
+  <p>로그인 처리 중입니다. <a href="/">자동으로 이동하지 않으면 여기를 클릭하세요.</a></p>
+</body>
+</html>`);
+  } catch (err) {
+    console.error('Google login error:', err.message);
+    return fail('google_failed');
+  }
 });
 
 // Logout Route
@@ -754,12 +1006,19 @@ app.post('/api/logout', (req, res) => {
 
 // Get Profile Details
 app.get('/api/profile', (req, res) => {
-  res.json({ username: authConfig.username });
+  const session = getSession(getCookie(req, 'session_token'));
+  const user = (session && session.user) || { provider: 'local' };
+  res.json({
+    username: authConfig.username,
+    provider: user.provider || 'local',
+    email: user.email || null,
+    displayName: user.name || authConfig.username
+  });
 });
 
 // Get Portal Configuration
 app.get('/api/config', (req, res) => {
-  res.json({ portalName: appConfig.portalName });
+  res.json({ portalName: appConfig.portalName, googleLoginEnabled: GOOGLE_LOGIN_ENABLED });
 });
 
 // Update Profile & Portal Configuration (Username, Password, Portal Name)
@@ -828,7 +1087,7 @@ wss.on('connection', (ws, req) => {
   const tokenMatch = cookies.match(/session_token=([^;]+)/);
   const token = tokenMatch ? tokenMatch[1] : null;
 
-  if (!token || !activeSessions.has(token) || activeSessions.get(token) <= Date.now()) {
+  if (!getSession(token)) {
     ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized WebSocket session.' }));
     ws.close();
     return;

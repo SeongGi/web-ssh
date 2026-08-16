@@ -41,6 +41,27 @@ key rotation remains mandatory.
   residual risk. Restrict the portal network path and independently verify remote
   host fingerprints before using privileged accounts.
 
+## Google login
+
+Google sign-in is optional and disabled by default. When it is enabled, a Google
+account grants exactly the same access as the local admin password: a shell on every
+managed server. Therefore:
+
+- The server refuses to enable Google login unless `GOOGLE_ALLOWED_EMAILS` or
+  `GOOGLE_ALLOWED_DOMAINS` names the accounts that may sign in. Client credentials
+  alone are not enough; without an allow list any Google account would be accepted.
+- Only accounts whose email Google reports as verified (`email_verified`) pass.
+- ID tokens are validated against Google's JWKS (RS256 signature, `iss`, `aud`, `exp`,
+  `iat`, `nonce`) rather than being trusted as received.
+- The authorization request carries `state` (CSRF), `nonce` (replay), and PKCE S256.
+- `GOOGLE_CLIENT_SECRET` is a credential. Keep it in the environment or a secret
+  manager, never in the repository, and rotate it in the Google Cloud console if it
+  leaks.
+- Prefer an `Internal` OAuth consent screen when the portal serves a single Workspace
+  organization, and keep the allow list as narrow as possible.
+- Removing an account from the allow list blocks future logins but does not end
+  sessions already open; restart the service to drop in-memory sessions.
+
 ## Deployment requirements
 
 - Set a unique `ADMIN_PASSWORD` of at least 12 characters before first start.

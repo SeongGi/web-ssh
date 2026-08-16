@@ -1,4 +1,5 @@
-const CACHE_NAME = 'web-ssh-v5';
+// Bumped so installed PWAs pick up the login page with the Google sign-in button.
+const CACHE_NAME = 'web-ssh-v6';
 const ASSETS = [
   '/',
   '/index.html',
