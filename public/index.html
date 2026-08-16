@@ -13,7 +13,7 @@
   <!-- xterm.css -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
   <!-- Custom CSS -->
-  <link rel="stylesheet" href="style.css?v=11">
+  <link rel="stylesheet" href="style.css?v=12">
   <!-- PWA Manifest -->
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#0e122b">
@@ -64,6 +64,10 @@
         <button id="refresh-all-status" class="btn btn-icon-text">
           <i data-lucide="refresh-cw"></i>
           <span>상태 새로고침</span>
+        </button>
+        <button id="audit-all-btn" class="btn btn-icon-text">
+          <i data-lucide="shield-check"></i>
+          <span>전체 보안 점검</span>
         </button>
       </div>
 
@@ -218,6 +222,28 @@
       </div>
     </div>
 
+    <!-- Security Audit Report Modal -->
+    <div id="audit-modal" class="modal-overlay">
+      <div class="modal-card" style="max-width: 860px;">
+        <header class="modal-header">
+          <h2 id="audit-modal-title">보안 점검 결과</h2>
+          <button class="btn-close" id="audit-close-btn">
+            <i data-lucide="x"></i>
+          </button>
+        </header>
+        <div id="audit-body" class="audit-body">
+          <!-- Report rendered here -->
+        </div>
+        <footer class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="audit-copy-btn">
+            <i data-lucide="clipboard" style="width:14px;height:14px"></i>
+            <span>보고서 복사</span>
+          </button>
+          <button type="button" class="btn btn-primary" id="audit-done-btn">닫기</button>
+        </footer>
+      </div>
+    </div>
+
     <!-- Terminal Screen Modal -->
     <div id="terminal-modal" class="terminal-overlay">
       <div class="terminal-container">
@@ -268,7 +294,7 @@
   <!-- xterm-addon-fit script -->
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <!-- Custom JS -->
-  <script src="app.js?v=11"></script>
+  <script src="app.js?v=12"></script>
   <!-- PWA Service Worker Registration -->
   <script>
     if ('serviceWorker' in navigator) {

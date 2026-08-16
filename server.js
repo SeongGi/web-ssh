@@ -851,6 +851,355 @@ app.post('/api/servers/:id/diagnose', (req, res) => {
   sshClient.connect(sshConfig);
 });
 
+// Security Audit
+
+// Read-only posture checks. Nothing here writes, installs, or restarts anything;
+// privileged probes go through `sudo -n` so they fail closed instead of prompting.
+const SECURITY_AUDIT_COMMAND = [
+  'export LC_ALL=C 2>/dev/null;',
+  // Every probe that can block on a lock, a repo refresh, or a big filesystem walk
+  // gets a hard cap so one slow check cannot stall the whole audit.
+  // TL is the longer budget for the package-manager probe, which routinely needs
+  // more than 10s (apt-check alone takes ~13s on a mid-size Ubuntu host).
+  'T=""; TL=""; command -v timeout >/dev/null 2>&1 && { T="timeout 10"; TL="timeout 30"; };',
+  'echo "===HOST===";',
+  'uname -sr 2>/dev/null;',
+  '. /etc/os-release 2>/dev/null && echo "OS=$PRETTY_NAME";',
+  'echo "===SSHD===";',
+  'if $T sudo -n /usr/sbin/sshd -T >/tmp/.sshdT.$$ 2>/dev/null || $T /usr/sbin/sshd -T >/tmp/.sshdT.$$ 2>/dev/null; then',
+  '  echo "SOURCE=effective"; cat /tmp/.sshdT.$$;',
+  'else',
+  '  echo "SOURCE=configfile";',
+  '  cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | sed -e "s/#.*//" -e "/^[[:space:]]*$/d" | tr -s " \\t" " " | sed -e "s/^ //" | tr "A-Z" "a-z";',
+  'fi;',
+  'rm -f /tmp/.sshdT.$$;',
+  'echo "===LISTEN===";',
+  'ss -tulnH 2>/dev/null | head -80 || netstat -tuln 2>/dev/null | head -80;',
+  'echo "===FIREWALL===";',
+  'for s in ufw firewalld nftables; do st=$(systemctl is-active $s 2>/dev/null); echo "svc:$s=${st:-unknown}"; done;',
+  'echo "ufw:$(ufw status 2>/dev/null | head -1)";',
+  'nf=$($T sudo -n nft list ruleset 2>/dev/null | grep -cE \'^[[:space:]]*(tcp|udp|ct|meta) \'); echo "nftrules:${nf:-NA}";',
+  // Count only INPUT rules, and drop docker/libvirt chains so container plumbing
+  // is not mistaken for an actual host firewall policy.
+  'ipt=$($T sudo -n iptables -S INPUT 2>/dev/null | grep \'^-A INPUT\' | grep -cvE \'DOCKER|LIBVIRT|br-|docker0|virbr\'); echo "iptinput:${ipt:-NA}";',
+  'echo "iptpolicy:$($T sudo -n iptables -S INPUT 2>/dev/null | grep \'^-P INPUT\' | awk \'{print $3}\')";',
+  'echo "===FAIL2BAN===";',
+  'echo "active=$(systemctl is-active fail2ban 2>/dev/null || echo unknown)";',
+  '$T sudo -n fail2ban-client status 2>/dev/null | head -3;',
+  'echo "===UPDATES===";',
+  'if [ -x /usr/lib/update-notifier/apt-check ]; then echo "aptcheck=$($TL /usr/lib/update-notifier/apt-check 2>&1)";',
+  'elif command -v apt-get >/dev/null 2>&1; then echo "aptinst=$($TL apt-get -s -o Debug::NoLocking=true upgrade 2>/dev/null | grep -c \'^Inst\')";',
+  'elif command -v dnf >/dev/null 2>&1; then echo "dnfcount=$($TL dnf -C -q check-update 2>/dev/null | grep -cE \'^[a-zA-Z0-9][^ ]*\\.\')";',
+  'else echo "pkgmgr=unknown"; fi;',
+  'echo "reboot_required=$([ -f /var/run/reboot-required ] && echo yes || echo no)";',
+  'if command -v needs-restarting >/dev/null 2>&1; then $T needs-restarting -r >/dev/null 2>&1; echo "needs_restarting_rc=$?"; fi;',
+  'echo "===SUDO===";',
+  'np=$($T sudo -n -l 2>/dev/null | grep -c NOPASSWD); echo "nopasswd=${np:-NA}";',
+  'echo "===KEYS===";',
+  'for f in "$HOME/.ssh/authorized_keys" /root/.ssh/authorized_keys; do',
+  '  [ -r "$f" ] && echo "ak:$f:$(stat -c %a "$f" 2>/dev/null):$(grep -cvE \'^[[:space:]]*(#|$)\' "$f" 2>/dev/null)";',
+  'done;',
+  '[ -d "$HOME/.ssh" ] && echo "dir:$HOME/.ssh:$(stat -c %a "$HOME/.ssh" 2>/dev/null)";',
+  '$T find "$HOME" -maxdepth 3 \\( -name "id_*" ! -name "*.pub" -o -name "*.pem" -o -name "*.key" \\) -type f 2>/dev/null | head -20 | while read -r k; do echo "privkey:$k:$(stat -c %a "$k" 2>/dev/null)"; done;',
+  'echo "===LOGINS===";',
+  'fl=$($T sudo -n journalctl -u ssh -u sshd --since \'24 hours ago\' --no-pager 2>/dev/null | grep -ciE \'failed password|invalid user\'); echo "failed24h=${fl:-NA}";',
+  'echo "===DOCKER===";',
+  '{ $T docker ps --format "{{.Names}}|{{.Ports}}" 2>/dev/null || $T sudo -n docker ps --format "{{.Names}}|{{.Ports}}" 2>/dev/null; } | head -20;',
+  'echo "===UNITS===";',
+  'for u in /etc/systemd/system/*.service; do',
+  '  [ -r "$u" ] || continue;',
+  '  p=$(stat -c %a "$u" 2>/dev/null);',
+  // Last octal digit >= 4 means every user on the box can read the file.
+  '  case "$p" in *[4567]) grep -qiE "^Environment=.*(KEY|TOKEN|SECRET|PASSWORD|WEBHOOK)" "$u" 2>/dev/null && echo "unit:$u:$p";; esac;',
+  'done 2>/dev/null;',
+  'echo "===END==="'
+].join(' ');
+
+function auditSection(stdout, name) {
+  const match = new RegExp(`===${name}===\\n([\\s\\S]*?)(?:\\n===|$)`).exec(stdout);
+  return match ? match[1].trim() : '';
+}
+
+function sshdSetting(sshdSection, key) {
+  const line = sshdSection
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.toLowerCase().startsWith(`${key} `))
+    .pop();
+  return line ? line.slice(key.length).trim().toLowerCase() : null;
+}
+
+// Turn the raw section output into severity-ranked findings.
+function parseSecurityAudit(stdout) {
+  const findings = [];
+  const add = (severity, category, title, detail, evidence) =>
+    findings.push({ severity, category, title, detail, evidence: evidence || null });
+
+  // SSH daemon configuration
+  const sshd = auditSection(stdout, 'SSHD');
+  const effective = sshd.includes('SOURCE=effective');
+  const configNote = effective ? '' : ' (설정 파일 기준 — sudo 권한이 없어 실효 설정을 읽지 못했습니다)';
+
+  const rootLogin = sshdSetting(sshd, 'permitrootlogin');
+  if (rootLogin === 'yes') {
+    add('critical', 'SSH', 'root 직접 로그인 허용', `PermitRootLogin=yes 입니다. root 계정에 대한 무차별 대입이 가능합니다.${configNote}`, `PermitRootLogin ${rootLogin}`);
+  } else if (rootLogin === 'without-password' || rootLogin === 'prohibit-password') {
+    add('low', 'SSH', 'root 키 로그인 허용', `PermitRootLogin=${rootLogin} — 키가 있으면 root로 직접 들어올 수 있습니다. 심층 방어 차원에서 no 권장.${configNote}`, `PermitRootLogin ${rootLogin}`);
+  }
+
+  const passwordAuth = sshdSetting(sshd, 'passwordauthentication');
+  if (passwordAuth === 'yes') {
+    add('high', 'SSH', '비밀번호 인증 허용', `PasswordAuthentication=yes 입니다. 키 인증만 사용한다면 꺼두는 편이 안전합니다.${configNote}`, `PasswordAuthentication ${passwordAuth}`);
+  }
+
+  const emptyPasswords = sshdSetting(sshd, 'permitemptypasswords');
+  if (emptyPasswords === 'yes') {
+    add('critical', 'SSH', '빈 비밀번호 로그인 허용', `PermitEmptyPasswords=yes 입니다.${configNote}`, `PermitEmptyPasswords ${emptyPasswords}`);
+  }
+
+  const maxAuthTries = parseInt(sshdSetting(sshd, 'maxauthtries') || '', 10);
+  if (Number.isFinite(maxAuthTries) && maxAuthTries > 6) {
+    add('low', 'SSH', '인증 시도 허용 횟수 과다', `MaxAuthTries=${maxAuthTries} 입니다.${configNote}`, `MaxAuthTries ${maxAuthTries}`);
+  }
+  if (!sshd) {
+    add('unknown', 'SSH', 'SSH 설정을 읽지 못함', 'sshd 설정을 확인할 수 없었습니다.', null);
+  }
+
+  // Listening sockets reachable from outside the host
+  const listen = auditSection(stdout, 'LISTEN');
+  const sockets = [];
+  for (const line of listen.split('\n')) {
+    const tokens = line.trim().split(/\s+/);
+    const proto = /^(tcp|udp)$/i.test(tokens[0]) ? tokens[0].toLowerCase() : '';
+    // ss prints "<local> <peer>"; the peer column always ends in ":*".
+    const local = tokens.find(t => /:(\d+)$/.test(t) && /[.:]/.test(t.slice(0, t.lastIndexOf(':'))));
+    if (!local) continue;
+    const port = local.slice(local.lastIndexOf(':') + 1);
+    const rawAddr = local.slice(0, local.lastIndexOf(':'));
+    // "0.0.0.0%virbr0" is scoped to one interface, so it is not a true wildcard bind.
+    const scoped = rawAddr.includes('%');
+    const addr = rawAddr.split('%')[0].replace(/[[\]]/g, '');
+    if (addr.startsWith('127.') || addr === '::1') continue;
+    const wildcard = !scoped && (addr === '0.0.0.0' || addr === '::' || addr === '*' || addr === '');
+    sockets.push({ proto, addr: addr || '*', port, wildcard, label: scoped ? rawAddr : addr });
+  }
+  const unique = [...new Map(sockets.map(s => [`${s.proto}:${s.addr}:${s.port}:${s.wildcard}`, s])).values()];
+
+  // A wildcard bind is reachable on every interface the host has, including public ones.
+  // IPv4 and IPv6 listeners for one service collapse into a single entry.
+  const wildcardPorts = [...new Set(unique.filter(s => s.wildcard && s.port !== '22').map(s => `${s.proto}/${s.port}`))];
+  if (wildcardPorts.length) {
+    add(
+      wildcardPorts.length > 4 ? 'high' : 'medium',
+      '네트워크',
+      `전체 인터페이스(0.0.0.0/::)에 열린 포트 ${wildcardPorts.length}개`,
+      '모든 인터페이스에 바인딩된 SSH 외 서비스입니다. 클라우드 보안 그룹으로만 막고 있다면 규칙이 풀리는 순간 그대로 인터넷에 노출됩니다. 내부 전용이라면 127.0.0.1로 바인딩하세요.',
+      wildcardPorts.join(', ')
+    );
+  }
+  const otherBinds = [...new Set(unique.filter(s => !s.wildcard && s.port !== '22').map(s => `${s.label}:${s.port}`))];
+  if (otherBinds.length) {
+    add('low', '네트워크', `특정 인터페이스에 열린 포트 ${otherBinds.length}개`, '루프백이 아닌 개별 주소나 인터페이스에 바인딩된 서비스입니다. 해당 주소가 외부에서 닿는지 확인하세요.', otherBinds.join(', '));
+  }
+  if (unique.some(s => s.port === '111')) {
+    add('medium', '네트워크', 'rpcbind(111) 노출', 'NFS를 쓰지 않는다면 rpcbind는 불필요합니다. 증폭 DDoS 반사체로 악용될 수 있으니 서비스를 중지하세요.', 'port 111');
+  }
+
+  // Host firewall
+  const firewall = auditSection(stdout, 'FIREWALL');
+  const activeFw = ['ufw', 'firewalld', 'nftables'].filter(s => new RegExp(`svc:${s}=active`).test(firewall));
+  const nftRules = parseInt((/nftrules:(\d+)/.exec(firewall) || [])[1] || '', 10);
+  const iptInput = parseInt((/iptinput:(\d+)/.exec(firewall) || [])[1] || '', 10);
+  const iptPolicy = (/iptpolicy:(\w+)/.exec(firewall) || [])[1] || '';
+  const probeBlocked = !/nftrules:\d/.test(firewall) && !/iptinput:\d/.test(firewall);
+  const hasHostRules = (Number.isFinite(nftRules) && nftRules > 0) || (Number.isFinite(iptInput) && iptInput > 0);
+  // A handful of INPUT rules with a default-ACCEPT policy is not a firewall — that is
+  // what fail2ban alone looks like. Default-deny is what actually gates traffic.
+  const defaultDeny = /^(DROP|REJECT)$/i.test(iptPolicy);
+
+  if (probeBlocked && !activeFw.length) {
+    add('unknown', '방화벽', '방화벽 상태 확인 불가', 'sudo 권한이 없어 규칙을 읽지 못했고, 활성화된 방화벽 서비스도 찾지 못했습니다.', null);
+  } else if (!activeFw.length && !defaultDeny) {
+    add('medium', '방화벽', '호스트 방화벽 없음 (기본 정책 ACCEPT)',
+      `동작 중인 방화벽 서비스가 없고 INPUT 기본 정책이 ${iptPolicy || 'ACCEPT'}입니다. docker/libvirt를 제외한 INPUT 규칙 ${Number.isFinite(iptInput) ? iptInput : 0}건은 fail2ban 등이 넣은 것으로 기본 차단 역할을 하지 못합니다. 클라우드 보안 그룹에만 의존하면 규칙 오설정 시 전면 노출됩니다.`,
+      `${firewall.split('\n').filter(l => l.startsWith('svc:')).join(' ')} INPUT정책=${iptPolicy || '?'} 규칙=${iptInput}`);
+  } else if (activeFw.length && !hasHostRules) {
+    add('high', '방화벽', '방화벽은 켜져 있으나 규칙이 비어 있음', `${activeFw.join(', ')} 서비스는 active인데 실제 필터 규칙이 0건입니다. 차단이 동작하지 않습니다.`, `nft=${nftRules} INPUT=${iptInput}`);
+  }
+
+  // fail2ban
+  const fail2ban = auditSection(stdout, 'FAIL2BAN');
+  if (/active=(inactive|failed|unknown)/.test(fail2ban)) {
+    add('medium', '침입차단', 'fail2ban 비활성', 'SSH 무차별 대입 차단이 동작하지 않습니다.', (/active=(\S+)/.exec(fail2ban) || [])[0]);
+  }
+
+  // Pending updates
+  const updates = auditSection(stdout, 'UPDATES');
+  const aptCheck = /aptcheck=(\d+);(\d+)/.exec(updates);
+  const aptInst = /aptinst=(\d+)/.exec(updates);
+  const dnfCount = /dnfcount=(\d+)/.exec(updates);
+  if (aptCheck) {
+    const [, total, security] = aptCheck;
+    if (Number(security) > 0) add('high', '패치', `보안 업데이트 ${security}건 미적용`, `전체 미적용 업데이트 ${total}건 중 보안 관련이 ${security}건입니다.`, `apt-check ${total};${security}`);
+    else if (Number(total) > 50) add('low', '패치', `미적용 업데이트 ${total}건`, '보안 업데이트는 없지만 누적된 패키지 업데이트가 많습니다.', `apt-check ${total};0`);
+  } else if (aptInst && Number(aptInst[1]) > 0) {
+    const count = Number(aptInst[1]);
+    add(count > 100 ? 'high' : 'medium', '패치', `미적용 업데이트 ${count}건`, '보안/일반 구분 없이 집계된 값입니다.', `apt ${count}`);
+  } else if (dnfCount && Number(dnfCount[1]) > 0) {
+    const count = Number(dnfCount[1]);
+    add(count > 100 ? 'high' : 'medium', '패치', `미적용 업데이트 ${count}건`, 'dnf 캐시 기준 집계입니다. 커널 패치가 포함되면 재부팅이 필요합니다.', `dnf ${count}`);
+  } else if (!aptCheck && !aptInst && !dnfCount) {
+    // A probe that times out must not read as "no pending updates".
+    add('unknown', '패치', '업데이트 상태 확인 불가',
+      /pkgmgr=unknown/.test(updates)
+        ? '지원하는 패키지 관리자를 찾지 못했습니다.'
+        : '패키지 관리자 조회가 제한 시간을 넘겨 미적용 업데이트 수를 세지 못했습니다. 서버에서 직접 확인하세요.',
+      updates.split('\n').filter(Boolean).join(' ') || null);
+  }
+  if (/reboot_required=yes/.test(updates) || /needs_restarting_rc=1/.test(updates)) {
+    add('medium', '패치', '재부팅 필요', '적용된 업데이트를 반영하려면 재부팅이 필요합니다. 커널 취약점이 아직 살아 있을 수 있습니다.', null);
+  }
+
+  // Passwordless sudo
+  const sudo = auditSection(stdout, 'SUDO');
+  const nopasswd = parseInt((/nopasswd:(\d+)/.exec(sudo) || [])[1] || '', 10);
+  if (Number.isFinite(nopasswd) && nopasswd > 0) {
+    add('medium', '권한', `NOPASSWD sudo 규칙 ${nopasswd}건`, '이 계정은 비밀번호 없이 sudo를 실행할 수 있습니다. SSH 키가 유출되면 즉시 root 권한으로 이어집니다.', `NOPASSWD x${nopasswd}`);
+  }
+
+  // Key and permission hygiene
+  const keys = auditSection(stdout, 'KEYS');
+  for (const line of keys.split('\n')) {
+    const ak = /^ak:(.+):(\d+):(\d+)$/.exec(line.trim());
+    if (ak) {
+      const [, file, mode, count] = ak;
+      const groupOther = mode.slice(-2);
+      // Group/other write lets another local user add their own key — sshd refuses it too.
+      if (/[2367]/.test(groupOther)) {
+        add('critical', '권한', 'authorized_keys 쓰기 권한 개방', `${file} 권한이 ${mode} 입니다. 다른 로컬 사용자가 자기 공개키를 추가할 수 있습니다. 즉시 600으로 낮추세요.`, `${file} ${mode}`);
+      } else if (/[4567]/.test(groupOther)) {
+        add('low', '권한', 'authorized_keys 읽기 권한 개방', `${file} 권한이 ${mode} 입니다. 노출 위험은 낮지만(공개키) 관례상 600으로 두세요.`, `${file} ${mode}`);
+      }
+      if (Number(count) > 5) add('low', '권한', `authorized_keys 항목 ${count}개`, `${file}에 등록된 공개키가 많습니다. 사용하지 않는 키가 남아 있는지 확인하세요.`, `${file} keys=${count}`);
+    }
+    const dir = /^dir:(.+):(\d+)$/.exec(line.trim());
+    if (dir && !/^700$/.test(dir[2])) {
+      add('medium', '권한', '.ssh 디렉터리 권한 과다', `${dir[1]} 권한이 ${dir[2]} 입니다. 700이어야 합니다.`, `${dir[1]} ${dir[2]}`);
+    }
+    const pk = /^privkey:(.+):(\d+)$/.exec(line.trim());
+    if (pk) {
+      const tooOpen = !/^[0-6]00$/.test(pk[2]);
+      add(tooOpen ? 'high' : 'low', '권한', tooOpen ? '개인키 권한 과다' : '서버에 개인키 파일 존재',
+        tooOpen
+          ? `${pk[1]} 권한이 ${pk[2]} 입니다. 600으로 낮추세요.`
+          : `${pk[1]} — 서버에 저장된 개인키입니다. 이 서버가 뚫리면 다른 서버로 번집니다. 꼭 필요한 게 아니면 제거하세요.`,
+        `${pk[1]} ${pk[2]}`);
+    }
+  }
+
+  // Brute-force pressure
+  const logins = auditSection(stdout, 'LOGINS');
+  const failed = parseInt((/failed24h=(\d+)/.exec(logins) || [])[1] || '', 10);
+  if (Number.isFinite(failed) && failed > 100) {
+    add(failed > 1000 ? 'medium' : 'low', '침입차단', `24시간 SSH 인증 실패 ${failed}건`, '지속적인 무차별 대입 시도가 있습니다. fail2ban과 키 전용 인증이 적용돼 있는지 확인하세요.', `failed=${failed}`);
+  }
+
+  // Containers publishing to all interfaces
+  const dockerSection = auditSection(stdout, 'DOCKER');
+  const openContainers = dockerSection
+    .split('\n')
+    .filter(l => l.includes('|') && /0\.0\.0\.0:|\[::\]:/.test(l))
+    .map(l => l.split('|')[0]);
+  if (openContainers.length) {
+    add('medium', '컨테이너', `전체 인터페이스에 게시된 컨테이너 ${openContainers.length}개`, '컨테이너 포트가 0.0.0.0으로 게시돼 호스트 방화벽을 우회합니다(도커는 iptables에 자체 규칙을 넣습니다). 내부 전용이라면 127.0.0.1로 게시하세요.', openContainers.join(', '));
+  }
+
+  // World-readable unit files carrying secrets
+  const units = auditSection(stdout, 'UNITS');
+  const leakyUnits = units.split('\n').filter(l => l.startsWith('unit:'));
+  if (leakyUnits.length) {
+    add('high', '시크릿', `시크릿이 담긴 world-readable 유닛 파일 ${leakyUnits.length}건`, 'systemd 유닛 파일에 API 키/토큰/비밀번호가 Environment=로 들어 있고 다른 사용자도 읽을 수 있습니다. 권한을 640으로 낮추고 해당 시크릿을 재발급하세요.', leakyUnits.map(l => l.replace('unit:', '')).join(', '));
+  }
+
+  const order = { critical: 0, high: 1, medium: 2, low: 3, unknown: 4 };
+  findings.sort((a, b) => order[a.severity] - order[b.severity]);
+
+  const counts = findings.reduce((acc, f) => ({ ...acc, [f.severity]: (acc[f.severity] || 0) + 1 }), {});
+  const hostLine = auditSection(stdout, 'HOST').split('\n');
+
+  return {
+    host: (hostLine.find(l => l.startsWith('OS=')) || '').replace('OS=', '') || hostLine[0] || 'unknown',
+    kernel: hostLine[0] || '',
+    privileged: effective,
+    findings,
+    counts,
+    checkedAt: new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })
+  };
+}
+
+// Build an ssh2 config from a stored connection profile.
+function buildSshConfig(conn) {
+  const sshConfig = { host: conn.host, port: conn.port || 22, username: conn.username, readyTimeout: 15000 };
+  if (conn.authType === 'key') {
+    if (!conn.privateKeyFile) throw new Error('이 서버에 등록된 개인키가 없습니다.');
+    const keyPath = path.join(KEYS_DIR, conn.privateKeyFile);
+    if (!fs.existsSync(keyPath)) throw new Error('개인키 파일을 서버에서 찾을 수 없습니다.');
+    sshConfig.privateKey = fs.readFileSync(keyPath);
+  } else if (conn.authType === 'password') {
+    sshConfig.password = conn.password;
+  } else {
+    throw new Error('인증 방식이 올바르지 않습니다.');
+  }
+  return sshConfig;
+}
+
+// Run the read-only security audit against a stored server
+app.post('/api/servers/:id/audit', (req, res) => {
+  const conn = readConnections().find(c => c.id === req.params.id);
+  if (!conn) return res.status(404).json({ error: 'Server not found' });
+
+  let sshConfig;
+  try {
+    sshConfig = buildSshConfig(conn);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+
+  const sshClient = new Client();
+  let settled = false;
+  const finish = (payload) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    try { sshClient.end(); } catch { /* already closed */ }
+    res.json(payload);
+  };
+  const timer = setTimeout(() => finish({ success: false, error: '점검이 60초 안에 끝나지 않아 중단했습니다.' }), 60000);
+
+  sshClient.on('ready', () => {
+    sshClient.exec(SECURITY_AUDIT_COMMAND, (err, stream) => {
+      if (err) return finish({ success: false, error: `명령 실행 실패: ${err.message}` });
+
+      let stdout = '';
+      stream.on('data', (data) => {
+        if (stdout.length < 512 * 1024) stdout += data.toString();
+      });
+      stream.stderr.on('data', () => { /* probes are expected to fail without sudo */ });
+      stream.on('close', () => {
+        try {
+          finish({ success: true, server: { id: conn.id, name: conn.name, host: conn.host }, ...parseSecurityAudit(stdout) });
+        } catch (e) {
+          console.error('Audit parse error:', e);
+          finish({ success: false, error: `점검 결과를 해석하지 못했습니다: ${e.message}` });
+        }
+      });
+    });
+  });
+
+  sshClient.on('error', (err) => finish({ success: false, error: err.message }));
+  sshClient.connect(sshConfig);
+});
+
 // Auth API Endpoints
 
 // Login Route

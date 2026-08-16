@@ -41,6 +41,26 @@ key rotation remains mandatory.
   residual risk. Restrict the portal network path and independently verify remote
   host fingerprints before using privileged accounts.
 
+## Security audit button
+
+The portal can run a read-only posture check against a stored server over SSH
+(`POST /api/servers/:id/audit`). What it does and does not do:
+
+- Every probe is read-only. Nothing is installed, written, restarted, or reconfigured.
+- Privileged probes go through `sudo -n`, so they fail closed instead of prompting.
+  When sudo is unavailable the report says so and falls back to config-file parsing;
+  treat those results as weaker evidence than the `sshd -T` effective configuration.
+- Each probe has a hard time cap. A probe that times out is reported as
+  "확인 불가" rather than being dropped — an audit must never render an unchecked
+  item as a clean one.
+- The audit reads paths and settings, not file contents of keys or secrets. It reports
+  that a private key exists and its mode; it never transmits key material.
+- Findings are heuristics, not proof. A default-ACCEPT INPUT policy with a fail2ban
+  rule is reported as "no host firewall" because that is what it is, but the operator
+  still has to decide whether the cloud security group is sufficient.
+- Audit results are only as trustworthy as the server. A compromised host can lie to
+  every one of these checks; this is a hygiene tool, not intrusion detection.
+
 ## Google login
 
 Google sign-in is optional and disabled by default. When it is enabled, a Google
