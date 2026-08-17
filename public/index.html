@@ -41,7 +41,7 @@
         </button>
         <button id="change-pwd-btn" class="btn btn-secondary btn-icon-text">
           <i data-lucide="key-round"></i>
-          <span>계정 정보 변경</span>
+          <span>포털 설정</span>
         </button>
         <button id="logout-btn" class="btn btn-secondary btn-icon-text" title="로그아웃" style="color: var(--color-offline);">
           <i data-lucide="log-out"></i>
@@ -184,39 +184,32 @@
     <div id="password-modal" class="modal-overlay">
       <div class="modal-card" style="max-width: 420px;">
         <header class="modal-header">
-          <h2>관리자 계정 설정 변경</h2>
+          <h2>포털 설정</h2>
           <button class="btn-close" id="pwd-close-btn">
             <i data-lucide="x"></i>
           </button>
         </header>
         <form id="password-form" style="display: flex; flex-direction: column; gap: 1.2rem;">
           <div class="form-group">
-            <label for="current-pwd">현재 비밀번호</label>
-            <input type="password" id="current-pwd" name="currentPassword" required placeholder="현재 비밀번호 입력">
-          </div>
-          <div class="form-group">
-            <label for="new-username">사용자 이름 (ID)</label>
-            <input type="text" id="new-username" name="newUsername" required placeholder="변경할 ID 입력">
+            <label>로그인 계정</label>
+            <input type="text" id="current-identity" value="" disabled>
+            <span class="field-hint">
+              Google 계정으로만 로그인합니다. 허용 계정은 서버 환경변수
+              (<code>GOOGLE_ALLOWED_EMAILS</code> / <code>GOOGLE_ALLOWED_DOMAINS</code>)로만
+              변경할 수 있습니다 — 세션이 탈취돼도 화면에서 접근 권한을 넓힐 수 없도록 의도한 설계입니다.
+            </span>
           </div>
           <div class="form-group">
             <label for="new-portal-name">포털 이름 (Portal Name)</label>
-            <input type="text" id="new-portal-name" name="portalName" required placeholder="변경할 포털 이름 입력">
-          </div>
-          <div class="form-group">
-            <label for="new-pwd">새 비밀번호 (비워두면 기존 유지)</label>
-            <input type="password" id="new-pwd" name="newPassword" placeholder="새 비밀번호 입력">
-          </div>
-          <div class="form-group">
-            <label for="confirm-pwd">새 비밀번호 확인</label>
-            <input type="password" id="confirm-pwd" name="confirmPassword" placeholder="새 비밀번호 재입력">
+            <input type="text" id="new-portal-name" name="portalName" required maxlength="60" placeholder="변경할 포털 이름 입력">
           </div>
           <div class="error-msg hidden" id="pwd-error-container" style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: var(--color-offline); border-radius: var(--border-radius-md); padding: 0.75rem 1rem; font-size: 0.8rem; display: flex; align-items: center; gap: 0.5rem; margin-top: 0.2rem;">
             <i data-lucide="alert-circle" style="width:16px;height:16px"></i>
-            <span id="pwd-error-text">비밀번호가 일치하지 않습니다.</span>
+            <span id="pwd-error-text">저장에 실패했습니다.</span>
           </div>
           <footer class="modal-footer">
             <button type="button" class="btn btn-secondary" id="pwd-cancel-btn">취소</button>
-            <button type="submit" class="btn btn-primary">변경 사항 저장</button>
+            <button type="submit" class="btn btn-primary">저장</button>
           </footer>
         </form>
       </div>

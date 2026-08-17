@@ -824,13 +824,13 @@ const pwdErrorText = document.getElementById('pwd-error-text');
 async function openPwdModal() {
   passwordForm.reset();
   pwdErrorContainer.classList.add('hidden');
-  
-  // Pre-populate username (ID) and portal name from server
+
+  // Show which Google account this session belongs to, and the current portal name.
   try {
     const resProfile = await fetch('/api/profile');
     if (resProfile.ok) {
       const data = await resProfile.json();
-      document.getElementById('new-username').value = data.username || 'admin';
+      document.getElementById('current-identity').value = data.email || data.displayName || '(알 수 없음)';
     }
     const resConfig = await fetch('/api/config');
     if (resConfig.ok) {
@@ -839,29 +839,27 @@ async function openPwdModal() {
     }
   } catch (err) {
     console.warn('Failed to load profile details:', err);
-    document.getElementById('new-username').value = 'admin';
     document.getElementById('new-portal-name').value = 'Web-SSH Portal';
   }
 
   passwordModal.classList.add('active');
+  document.body.style.overflow = 'hidden';
 }
 
 function closePwdModal() {
   passwordModal.classList.remove('active');
+  document.body.style.overflow = '';
 }
 
+// Only the portal name is editable — there is no local credential, and the Google
+// allow list is intentionally environment-only.
 async function handlePasswordChange(e) {
   e.preventDefault();
   pwdErrorContainer.classList.add('hidden');
 
-  const currentPassword = document.getElementById('current-pwd').value;
-  const newUsername = document.getElementById('new-username').value.trim();
   const portalName = document.getElementById('new-portal-name').value.trim();
-  const newPassword = document.getElementById('new-pwd').value;
-  const confirmPassword = document.getElementById('confirm-pwd').value;
-
-  if (newPassword && newPassword !== confirmPassword) {
-    pwdErrorText.innerText = '새 비밀번호와 확인 비밀번호가 일치하지 않습니다.';
+  if (!portalName) {
+    pwdErrorText.innerText = '포털 이름을 입력하세요.';
     pwdErrorContainer.classList.remove('hidden');
     return;
   }
@@ -869,23 +867,31 @@ async function handlePasswordChange(e) {
   try {
     const res = await fetch('/api/update-profile', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ currentPassword, newUsername, newPassword, portalName })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ portalName })
     });
 
-    const data = await res.json();
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
+
     if (res.ok && data.success) {
-      alert('계정 및 포털 정보가 성공적으로 변경되었습니다. 다시 로그인해주세요.');
-      handleLogout();
+      // No re-login needed: nothing about the session changed.
+      const name = data.portalName || portalName;
+      document.title = name;
+      const brandTitle = document.getElementById('brand-title');
+      if (brandTitle) brandTitle.innerText = name;
+      closePwdModal();
     } else {
-      pwdErrorText.innerText = data.error || '계정 정보 변경에 실패했습니다.';
+      pwdErrorText.innerText = data.error || '저장에 실패했습니다.';
       pwdErrorContainer.classList.remove('hidden');
     }
   } catch (err) {
-    console.error('Profile update error:', err);
-    pwdErrorText.innerText = '계정 정보 변경 처리 중 오류가 발생했습니다.';
+    console.error('Portal settings update error:', err);
+    pwdErrorText.innerText = '저장 처리 중 오류가 발생했습니다.';
     pwdErrorContainer.classList.remove('hidden');
   }
 }

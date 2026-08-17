@@ -63,13 +63,23 @@ The portal can run a read-only posture check against a stored server over SSH
 
 ## Google login
 
-Google sign-in is optional and disabled by default. When it is enabled, a Google
-account grants exactly the same access as the local admin password: a shell on every
-managed server. Therefore:
+Google is the only identity provider. Local password authentication was removed: it was
+a second, weaker credential guarding the same thing (a root shell on every managed
+server), it had to be stored and rotated by hand, and its default-password bootstrap
+path caused a live exposure on 2026-08-17. A Google account now grants full portal
+access, so:
 
-- The server refuses to enable Google login unless `GOOGLE_ALLOWED_EMAILS` or
-  `GOOGLE_ALLOWED_DOMAINS` names the accounts that may sign in. Client credentials
-  alone are not enough; without an allow list any Google account would be accepted.
+- The server refuses to *start* unless `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and
+  an allow list (`GOOGLE_ALLOWED_EMAILS` or `GOOGLE_ALLOWED_DOMAINS`) are all present.
+  Without an allow list any Google account on the internet would be accepted, and
+  because this is the only login path, a partially configured portal that still serves
+  traffic could be mistaken for a healthy one. Failing closed at boot is deliberate.
+- The allow list is environment-only and has no UI. A hijacked session therefore cannot
+  widen who may log in.
+- There is no stored credential, so there is no password to leak, rotate, or brute
+  force. Account lockout, throttling and MFA are Google's responsibility.
+- Losing access is recovered by fixing the environment and restarting — not through the
+  UI. Portal lockout does not affect SSH access to the managed servers themselves.
 - Only accounts whose email Google reports as verified (`email_verified`) pass.
 - ID tokens are validated against Google's JWKS (RS256 signature, `iss`, `aud`, `exp`,
   `iat`, `nonce`) rather than being trusted as received.
@@ -81,10 +91,13 @@ managed server. Therefore:
   organization, and keep the allow list as narrow as possible.
 - Removing an account from the allow list blocks future logins but does not end
   sessions already open; restart the service to drop in-memory sessions.
+- A leftover `auth.json` from a password-login release is deleted at startup so a
+  no-longer-honoured hash does not linger in the data volume.
 
 ## Deployment requirements
 
-- Set a unique `ADMIN_PASSWORD` of at least 12 characters before first start.
+- Configure Google login fully before first start; the server refuses to boot without
+  a client ID, a client secret, and an allow list. There is no local password to set.
 - Keep `/app/data` in a protected volume; files are created with owner-only access.
 - Never commit `data/`, `.env`, SSH exports, archives, private keys, or backups.
 - Put the service behind an authenticated HTTPS reverse proxy or private VPN; do not

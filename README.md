@@ -23,9 +23,9 @@
    - 서버를 프로젝트/클라우드별로 그룹화하고, 접기/펴기 상태를 브라우저에 저장합니다.
 
 5. 세션 및 보안
-   - 관리자 비밀번호는 PBKDF2 SHA-512 (210,000 iterations) + salt로 저장합니다.
    - HttpOnly, SameSite=Strict 세션 쿠키로 API와 WebSocket 채널을 보호합니다.
-   - 대시보드에서 포털 이름, 관리자 ID, 비밀번호를 언제든지 변경할 수 있습니다.
+   - 저장되는 자격증명이 없습니다. 인증은 전적으로 Google에 위임합니다.
+   - 대시보드에서 포털 이름을 변경할 수 있습니다.
 
 6. 보안 점검 (Security Audit)
    - 서버 카드의 **점검** 버튼, 또는 상단의 **전체 보안 점검** 버튼으로 실행합니다.
@@ -35,11 +35,13 @@
      시크릿이 담긴 world-readable 유닛 파일을 확인합니다.
    - 결과는 치명적/높음/중간/낮음/확인불가로 등급을 나눠 보여주고, 텍스트로 복사할 수 있습니다.
 
-7. Google 로그인 (선택)
-   - ID/비밀번호 대신 Google 계정으로 로그인할 수 있습니다.
+7. Google 로그인 (**유일한 로그인 방식**)
+   - 아이디/비밀번호 로그인은 제거됐습니다. Google 계정으로만 들어올 수 있습니다.
    - OAuth 2.0 Authorization Code + PKCE 흐름을 사용하며, 외부 라이브러리 없이 표준 라이브러리로 구현되어 있습니다.
-   - ID 토큰은 Google JWKS로 서명을 검증하고 `iss`, `aud`, `exp`, `nonce`까지 확인합니다.
-   - 허용 목록(이메일 또는 도메인)에 있는 계정만 로그인할 수 있습니다.
+   - ID 토큰은 Google JWKS로 서명을 검증하고 `iss`, `aud`, `exp`, `iat`, `nonce`까지 확인합니다.
+   - 허용 목록(이메일 또는 도메인)에 있는, Google이 인증한 이메일 계정만 로그인할 수 있습니다.
+   - 허용 목록은 **환경변수로만** 바꿀 수 있습니다. 세션이 탈취돼도 UI에서 접근 권한을 넓힐 수 없습니다.
+   - 설정이 불완전하면 서버가 **기동을 거부**합니다. 로그인 불가 상태로 떠 있는 것보다 즉시 실패하는 편이 안전합니다.
 
 ---
 
@@ -57,7 +59,7 @@ ssh-connect/
 │   └── icon.jpg          # PWA 아이콘
 ├── server.js             # Express 서버, WebSocket SSH 게이트웨이, Google OAuth 처리
 ├── import-existing.js    # 기존 접속 정보 마이그레이션 스크립트
-├── .env.example          # 환경변수 예시 (관리자 계정, Google 로그인)
+├── .env.example          # 환경변수 예시 (Google 로그인 설정)
 ├── Dockerfile
 ├── docker-compose.yml
 └── README.md
@@ -67,7 +69,8 @@ ssh-connect/
 
 ## 설치 및 실행
 
-Docker만 있으면 됩니다.
+Docker와 Google OAuth 클라이언트가 필요합니다.
+**먼저 아래 "Google 로그인 설정"을 완료하세요** — 유일한 로그인 방식이라, 설정 없이는 서버가 기동하지 않습니다.
 
 ### 방법 A: Docker 명령어로 바로 실행
 
@@ -76,7 +79,11 @@ docker run -d \
   --name web-ssh \
   -p 3000:3000 \
   -e DATA_DIR=/app/data \
-  -e ADMIN_PASSWORD='충분히-긴-임의의-비밀번호' \
+  -e GOOGLE_CLIENT_ID='xxxxxxxx.apps.googleusercontent.com' \
+  -e GOOGLE_CLIENT_SECRET='...' \
+  -e GOOGLE_ALLOWED_EMAILS='you@example.com' \
+  -e GOOGLE_REDIRECT_URI='https://ssh.example.com/api/auth/google/callback' \
+  -e COOKIE_SECURE=true \
   -v web-ssh-data:/app/data \
   --restart unless-stopped \
   ghcr.io/seonggi/web-ssh:latest
@@ -85,7 +92,10 @@ docker run -d \
 ### 방법 B: Docker Compose로 실행 (권장)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/SeongGi/web-ssh/main/docker-compose.prod.yml -o docker-compose.yml && docker compose up -d
+curl -sSL https://raw.githubusercontent.com/SeongGi/web-ssh/main/docker-compose.prod.yml -o docker-compose.yml
+curl -sSL https://raw.githubusercontent.com/SeongGi/web-ssh/main/.env.example -o .env
+$EDITOR .env    # GOOGLE_* 값을 채웁니다
+docker compose up -d
 ```
 
 ### 방법 C: 소스 코드에서 직접 빌드
@@ -93,27 +103,23 @@ curl -sSL https://raw.githubusercontent.com/SeongGi/web-ssh/main/docker-compose.
 ```bash
 git clone https://github.com/SeongGi/web-ssh.git
 cd web-ssh
+cp .env.example .env && $EDITOR .env
 docker compose up -d --build
 ```
 
-### 초기 접속 정보
+### 접속
 
-- 접속 URL: `http://localhost:3000`
-- 초기 ID: `ADMIN_USERNAME` 환경변수 값 (기본값 `admin`)
-- 초기 비밀번호: 최초 실행 전에 12자 이상의 `ADMIN_PASSWORD` 환경변수를 반드시 설정해야 합니다.
-
-```bash
-export ADMIN_PASSWORD='충분히-긴-임의의-비밀번호'
-docker compose up -d
-```
+- 접속 URL: `http://localhost:3000` (또는 설정한 도메인)
+- 로그인 화면의 **Google 계정으로 로그인** 버튼만 있습니다. 저장된 비밀번호는 없습니다.
+- 허용 목록에 없는 계정은 거부됩니다.
 
 HTTPS 리버스 프록시를 사용하는 운영 환경에서는 `COOKIE_SECURE=true`도 설정하세요.
 
 ---
 
-## Google 로그인 설정 (선택)
+## Google 로그인 설정 (필수)
 
-Google 계정으로 포털에 로그인하려면 OAuth 클라이언트를 만들고 환경변수 네 가지를 설정합니다.
+Google 계정이 유일한 로그인 방식입니다. OAuth 클라이언트를 만들고 환경변수를 설정하세요.
 
 ### 1. Google Cloud Console에서 OAuth 클라이언트 만들기
 
@@ -156,20 +162,37 @@ docker compose up -d
 
 ### 3. 동작 방식과 안전장치
 
-- 위 설정이 모두 갖춰진 경우에만 로그인 화면에 **Google 계정으로 로그인** 버튼이 나타납니다.
-- **허용 목록이 비어 있으면 Google 로그인은 자동으로 비활성화됩니다.** 허용 목록이 없으면
-  전 세계 아무 Google 계정이나 모든 관리 서버의 셸을 열 수 있게 되므로, 의도적으로 막아 둔 동작입니다.
-  이 경우 서버 로그에 경고가 출력됩니다.
+- **설정이 불완전하면 서버가 기동을 거부합니다.** 유일한 로그인 방식이므로, 로그인할 수 없는 상태로
+  서비스가 떠 있는 것(정상으로 오인 가능)보다 즉시 실패하는 편이 안전합니다. 부족한 항목이 로그에 출력됩니다.
+- **허용 목록이 없으면 기동하지 않습니다.** 허용 목록 없이 켜면 전 세계 아무 Google 계정이나
+  모든 관리 서버의 셸을 열 수 있게 됩니다.
+- 허용 목록은 **환경변수로만** 변경할 수 있습니다. UI에는 수정 경로가 없으므로, 세션이 탈취돼도
+  공격자가 자기 계정을 허용 목록에 추가할 수 없습니다.
 - 이메일이 Google에서 인증된(`email_verified`) 계정만 통과합니다.
 - CSRF 방지를 위한 `state`, 재생 공격 방지를 위한 `nonce`, 그리고 PKCE(S256)를 함께 사용합니다.
-- Google 로그인을 설정해도 기존 ID/비밀번호 로그인은 그대로 사용할 수 있습니다.
+- 저장되는 비밀번호가 없습니다. 계정 잠금·무차별 대입 차단·MFA는 Google이 담당합니다.
 - 운영 환경에서는 반드시 HTTPS와 `COOKIE_SECURE=true`를 함께 사용하세요.
+
+### 로그인이 안 될 때 (복구)
+
+저장된 비밀번호가 없으므로 UI로 복구할 수 없습니다. 복구는 환경변수를 고치고 재시작하는 것뿐입니다.
+
+```bash
+docker logs ssh-connect | tail -20        # 부족한 설정이 무엇인지 확인
+$EDITOR .env                              # GOOGLE_* 수정
+docker compose up -d                      # 재시작
+```
+
+흔한 원인은 GCP 콘솔의 승인된 리디렉션 URI가 `GOOGLE_REDIRECT_URI`와 한 글자라도 다른 경우
+(`redirect_uri_mismatch`)와, 로그인하려는 계정이 허용 목록에 없는 경우(`?error=google_forbidden`)입니다.
+포털이 잠겨도 SSH 접속 자체는 영향받지 않으니, 서버에는 평소 쓰는 SSH 클라이언트로 접속하면 됩니다.
 
 ---
 
 ## 백업 및 마이그레이션
 
-서버 목록, 인증 정보, SSH 개인키는 Git 저장소가 아닌 Docker named volume에 저장됩니다.
+서버 목록과 SSH 개인키는 Git 저장소가 아닌 Docker named volume에 저장됩니다.
+관리자 자격증명은 더 이상 저장되지 않습니다(Google 로그인 전용).
 Node.js로 직접 실행할 때는 기본적으로 `~/.local/share/web-ssh`에 저장되며,
 필요하면 `DATA_DIR` 환경변수로 저장소 밖의 다른 보안 경로를 지정할 수 있습니다.
 
@@ -196,8 +219,8 @@ docker run --rm \
   alpine sh -c 'cp -a /source/. /target/ && chmod 700 /target /target/keys && chmod 600 /target/*.json /target/keys/*.pem'
 ```
 
-`auth.json`을 복사하지 않으면 다음 기동 때 `ADMIN_USERNAME` / `ADMIN_PASSWORD`
-환경변수로 관리자 계정이 새로 만들어집니다. 비밀번호를 교체하려면 이 방법이 가장 간단합니다.
+구버전에서 올라온 볼륨에 `auth.json`이 남아 있으면 기동 시 자동으로 삭제됩니다.
+더 이상 사용되지 않는 비밀번호 해시를 데이터 볼륨에 남겨두지 않기 위한 조치입니다.
 
 백업도 저장소 폴더가 아닌 별도 보안 경로에 만들고 Git에는 추가하지 마세요.
 과거 노출된 키나 아카이브는 실행 중인 컨테이너의 데이터 볼륨에 남겨두지 마세요.

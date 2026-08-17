@@ -70,17 +70,6 @@
       font-size: 0.8rem;
       color: var(--text-secondary);
     }
-    .login-form {
-      display: flex;
-      flex-direction: column;
-      gap: 1.2rem;
-    }
-    .login-btn {
-      width: 100%;
-      height: 46px;
-      font-size: 0.95rem;
-      margin-top: 0.5rem;
-    }
     .error-msg {
       background: rgba(239, 68, 68, 0.1);
       border: 1px solid rgba(239, 68, 68, 0.3);
@@ -92,22 +81,6 @@
       align-items: center;
       gap: 0.5rem;
       animation: shake 0.3s ease;
-    }
-    .login-divider {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      font-size: 0.72rem;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-    }
-    .login-divider::before,
-    .login-divider::after {
-      content: "";
-      flex: 1;
-      height: 1px;
-      background: rgba(255, 255, 255, 0.08);
     }
     .google-btn {
       width: 100%;
@@ -165,32 +138,16 @@
           <i data-lucide="shield-alert"></i>
         </div>
         <h2 id="portal-title-text">Web-SSH Portal</h2>
-        <p>인증된 관리자 계정으로 로그인하세요.</p>
+        <p>허용된 Google 계정으로만 로그인할 수 있습니다.</p>
       </div>
 
       <div id="error-container" class="error-msg hidden">
         <i data-lucide="alert-circle" style="width:16px;height:16px"></i>
-        <span id="error-text">로그인 정보가 잘못되었습니다.</span>
+        <span id="error-text">로그인에 실패했습니다.</span>
       </div>
 
-      <form id="login-form" class="login-form">
-        <div class="form-group">
-          <label for="username">사용자 이름</label>
-          <input type="text" id="username" name="username" required placeholder="admin" autocomplete="username">
-        </div>
-        <div class="form-group">
-          <label for="password">비밀번호</label>
-          <input type="password" id="password" name="password" required placeholder="비밀번호 입력" autocomplete="current-password">
-        </div>
-        <button type="submit" class="btn btn-primary login-btn">
-          <i data-lucide="log-in"></i>
-          <span>로그인</span>
-        </button>
-      </form>
-
-      <div id="google-login" class="hidden">
-        <div class="login-divider">또는</div>
-        <a href="/api/auth/google" class="google-btn" style="margin-top: 1.2rem;">
+      <div id="google-login">
+        <a href="/api/auth/google" class="google-btn">
           <svg viewBox="0 0 48 48" aria-hidden="true">
             <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
             <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
@@ -216,7 +173,7 @@
       lucide.createIcons();
     }
 
-    // Load portal name and available login methods from the config API
+    // Load the portal name from the config API
     async function loadPortalConfig() {
       try {
         const res = await fetch('/api/config');
@@ -225,9 +182,6 @@
           const name = data.portalName || 'Web-SSH Portal';
           document.title = `Login - ${name}`;
           document.getElementById('portal-title-text').innerText = name;
-          if (data.googleLoginEnabled) {
-            document.getElementById('google-login').classList.remove('hidden');
-          }
         }
       } catch (e) {
         console.warn('Failed to load portal config:', e);
@@ -237,7 +191,6 @@
 
     // Surface failures reported by the Google OAuth callback
     const GOOGLE_ERRORS = {
-      google_disabled: 'Google 로그인이 이 포털에서 활성화되어 있지 않습니다.',
       google_denied: 'Google 로그인이 취소되었습니다.',
       google_state: 'Google 로그인 요청이 만료되었거나 유효하지 않습니다. 다시 시도해 주세요.',
       google_token: 'Google 인증 서버와 토큰을 교환하지 못했습니다.',
@@ -250,36 +203,6 @@
       showError(GOOGLE_ERRORS[loginError] || '로그인에 실패했습니다.');
       window.history.replaceState({}, document.title, window.location.pathname);
     }
-
-    document.getElementById('login-form').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      
-      const username = document.getElementById('username').value;
-      const password = document.getElementById('password').value;
-
-      errorContainer.classList.add('hidden');
-
-      try {
-        const res = await fetch('/api/login', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ username, password })
-        });
-
-        const data = await res.json();
-
-        if (res.ok && data.success) {
-          window.location.href = '/';
-        } else {
-          showError(data.error || '로그인에 실패했습니다.');
-        }
-      } catch (err) {
-        console.error('Login error:', err);
-        showError('네트워크 통신 오류가 발생했습니다.');
-      }
-    });
   </script>
 </body>
 </html>
