@@ -7,6 +7,20 @@ const os = require('os');
 const net = require('net');
 const { Client } = require('ssh2');
 const crypto = require('crypto');
+const { StringDecoder } = require('string_decoder');
+
+// PTY geometry guards. ssh2 pushes these straight through writeUInt32BE, where a
+// NaN or undefined becomes 0 — and a 0-column PTY makes the remote wrap after every
+// single cell, which on screen looks like one character per line.
+function clampTermCols(value) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? Math.min(1000, Math.max(2, n)) : 80;
+}
+
+function clampTermRows(value) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? Math.min(1000, Math.max(1, n)) : 24;
+}
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(os.homedir(), '.local', 'share', 'web-ssh'));
@@ -209,10 +223,19 @@ function base64UrlDecode(value) {
   return Buffer.from(String(value).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
 }
 
+// /api/auth/google is unauthenticated, so the pending-state map is reachable by
+// anyone. Expiry alone is not a bound: cap the size and evict oldest-first so the map
+// cannot be grown without limit inside a single TTL window.
+const MAX_PENDING_OAUTH_STATES = 500;
+
 function prunePendingOAuthStates() {
   const now = Date.now();
   for (const [state, entry] of pendingOAuthStates) {
     if (entry.expiresAt <= now) pendingOAuthStates.delete(state);
+  }
+  while (pendingOAuthStates.size >= MAX_PENDING_OAUTH_STATES) {
+    // Map iteration is insertion-ordered, so the first key is the oldest.
+    pendingOAuthStates.delete(pendingOAuthStates.keys().next().value);
   }
 }
 
@@ -576,7 +599,10 @@ app.put('/api/servers/:id', (req, res) => {
     // Delete password if switching to key
     delete existing.password;
   } else if (authType === 'password') {
-    if (password !== undefined) {
+    // The edit form cannot prefill the stored password, so it always submits an empty
+    // string. Treating "" as a new value silently wiped the credential on any edit —
+    // even a rename. Only a non-empty value replaces it.
+    if (password) {
       existing.password = password;
     }
     // Delete key file if switching to password
@@ -719,6 +745,51 @@ app.get('/api/scan-ip', (req, res) => {
   socket.connect(targetPort, host);
 });
 
+const DIAGNOSTIC_COMMAND = 'cat /etc/os-release; echo "---CPU---"; nproc; grep "model name" /proc/cpuinfo | head -1; echo "---MEM---"; cat /proc/meminfo | grep -E "MemTotal|MemFree|MemAvailable"; echo "---DISK---"; df -h /; echo "---UPTIME---"; uptime;';
+
+// Run one command over SSH and hand back stdout.
+// This exists to close two defects the inline copies shared: ssh2 can emit 'error'
+// after the response was already sent, and the second res.json() threw
+// ERR_HTTP_HEADERS_SENT from an EventEmitter callback — an uncaught exception that
+// took the whole portal down. And nothing bounded a hung command, so the HTTP request
+// (and the caller's spinner) hung forever. Also decodes UTF-8 incrementally so
+// multi-byte characters split across chunks are not corrupted.
+function runSshCommand(sshConfig, command, options, callback) {
+  const { timeoutMs = 30000, maxBytes = 512 * 1024 } = options || {};
+  const sshClient = new Client();
+  const decoder = new StringDecoder('utf8');
+  let stdout = '';
+  let truncated = false;
+  let settled = false;
+
+  const finish = (err, result) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    try { sshClient.end(); } catch { /* already closed */ }
+    callback(err, result);
+  };
+
+  const timer = setTimeout(
+    () => finish(new Error(`명령이 ${Math.round(timeoutMs / 1000)}초 안에 끝나지 않아 중단했습니다.`)),
+    timeoutMs
+  );
+
+  sshClient.on('ready', () => {
+    sshClient.exec(command, (err, stream) => {
+      if (err) return finish(new Error(`명령 실행 실패: ${err.message}`));
+      stream.on('data', (data) => {
+        if (stdout.length < maxBytes) stdout += decoder.write(data);
+        else truncated = true;
+      });
+      stream.stderr.on('data', () => { /* probes are expected to fail without sudo */ });
+      stream.on('close', () => finish(null, { stdout: stdout + decoder.end(), truncated }));
+    });
+  });
+  sshClient.on('error', (err) => finish(err));
+  sshClient.connect(sshConfig);
+}
+
 // Deep Credentials Diagnostics & System Specs Scan
 app.post('/api/servers/diagnose', (req, res) => {
   const { host, port, username, authType, password, privateKey } = req.body;
@@ -746,35 +817,10 @@ app.post('/api/servers/diagnose', (req, res) => {
     return res.status(400).json({ error: 'Invalid authentication type' });
   }
 
-  const sshClient = new Client();
-
-  sshClient.on('ready', () => {
-    const command = 'cat /etc/os-release; echo "---CPU---"; nproc; grep "model name" /proc/cpuinfo | head -1; echo "---MEM---"; cat /proc/meminfo | grep -E "MemTotal|MemFree|MemAvailable"; echo "---DISK---"; df -h /; echo "---UPTIME---"; uptime;';
-    
-    sshClient.exec(command, (err, stream) => {
-      if (err) {
-        sshClient.end();
-        return res.json({ success: false, error: `Command execution failed: ${err.message}` });
-      }
-
-      let stdout = '';
-      stream.on('data', (data) => {
-        stdout += data.toString();
-      });
-
-      stream.on('close', () => {
-        sshClient.end();
-        const result = parseDiagnosticOutput(stdout);
-        res.json(result);
-      });
-    });
+  runSshCommand(sshConfig, DIAGNOSTIC_COMMAND, { timeoutMs: 30000 }, (err, result) => {
+    if (err) return res.json({ success: false, error: err.message });
+    res.json(parseDiagnosticOutput(result.stdout));
   });
-
-  sshClient.on('error', (err) => {
-    res.json({ success: false, error: err.message });
-  });
-
-  sshClient.connect(sshConfig);
 });
 
 // Trigger deep credentials diagnostics & system specs scan for an existing server
@@ -787,68 +833,29 @@ app.post('/api/servers/:id/diagnose', (req, res) => {
     return res.status(404).json({ error: 'Server not found' });
   }
 
-  const sshConfig = {
-    host: conn.host,
-    port: conn.port,
-    username: conn.username,
-    readyTimeout: 10000
-  };
-
-  if (conn.authType === 'key') {
-    if (!conn.privateKeyFile) {
-      return res.status(400).json({ error: 'Private Key file not found on server' });
-    }
-    const keyPath = path.join(KEYS_DIR, conn.privateKeyFile);
-    if (!fs.existsSync(keyPath)) {
-      return res.status(400).json({ error: 'Private Key file does not exist on disk' });
-    }
-    sshConfig.privateKey = fs.readFileSync(keyPath, 'utf-8');
-  } else if (conn.authType === 'password') {
-    sshConfig.password = conn.password;
-  } else {
-    return res.status(400).json({ error: 'Invalid authentication type' });
+  let sshConfig;
+  try {
+    sshConfig = buildSshConfig(conn);
+    sshConfig.readyTimeout = 10000;
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
   }
 
-  const sshClient = new Client();
+  runSshCommand(sshConfig, DIAGNOSTIC_COMMAND, { timeoutMs: 30000 }, (err, out) => {
+    if (err) return res.json({ success: false, error: err.message });
 
-  sshClient.on('ready', () => {
-    const command = 'cat /etc/os-release; echo "---CPU---"; nproc; grep "model name" /proc/cpuinfo | head -1; echo "---MEM---"; cat /proc/meminfo | grep -E "MemTotal|MemFree|MemAvailable"; echo "---DISK---"; df -h /; echo "---UPTIME---"; uptime;';
-    
-    sshClient.exec(command, (err, stream) => {
-      if (err) {
-        sshClient.end();
-        return res.json({ success: false, error: `Command execution failed: ${err.message}` });
-      }
+    const result = parseDiagnosticOutput(out.stdout);
+    if (!result.success) {
+      return res.json({ success: false, error: 'Failed to parse diagnostic output' });
+    }
 
-      let stdout = '';
-      stream.on('data', (data) => {
-        stdout += data.toString();
-      });
+    conn.os = result.os;
+    conn.spec = result.spec;
+    conn.systemInfo = result.systemInfo;
+    writeConnections(connections);
 
-      stream.on('close', () => {
-        sshClient.end();
-        
-        const result = parseDiagnosticOutput(stdout);
-        if (result.success) {
-          // Update database
-          conn.os = result.os;
-          conn.spec = result.spec;
-          conn.systemInfo = result.systemInfo;
-          writeConnections(connections);
-          
-          res.json({ success: true, os: result.os, spec: result.spec, systemInfo: result.systemInfo });
-        } else {
-          res.json({ success: false, error: 'Failed to parse diagnostic output' });
-        }
-      });
-    });
+    res.json({ success: true, os: result.os, spec: result.spec, systemInfo: result.systemInfo });
   });
-
-  sshClient.on('error', (err) => {
-    res.json({ success: false, error: err.message });
-  });
-
-  sshClient.connect(sshConfig);
 });
 
 // Security Audit
@@ -866,25 +873,44 @@ const SECURITY_AUDIT_COMMAND = [
   'uname -sr 2>/dev/null;',
   '. /etc/os-release 2>/dev/null && echo "OS=$PRETTY_NAME";',
   'echo "===SSHD===";',
-  'if $T sudo -n /usr/sbin/sshd -T >/tmp/.sshdT.$$ 2>/dev/null || $T /usr/sbin/sshd -T >/tmp/.sshdT.$$ 2>/dev/null; then',
-  '  echo "SOURCE=effective"; cat /tmp/.sshdT.$$;',
+  // Command substitution instead of a /tmp file: the old `>/tmp/.sshdT.$$` was a
+  // predictable path that followed symlinks, so a local user on the audited host
+  // could have this read-only audit clobber a file.
+  'sshdT=$($T sudo -n /usr/sbin/sshd -T 2>/dev/null || $T /usr/sbin/sshd -T 2>/dev/null);',
+  'if [ -n "$sshdT" ]; then',
+  '  echo "SOURCE=effective"; printf "%s\\n" "$sshdT";',
   'else',
-  '  echo "SOURCE=configfile";',
-  '  cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | sed -e "s/#.*//" -e "/^[[:space:]]*$/d" | tr -s " \\t" " " | sed -e "s/^ //" | tr "A-Z" "a-z";',
+  '  cfg=$(cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null);',
+  '  if [ -n "$cfg" ]; then',
+  // Stop at the first Match block: sshd applies Match rules conditionally, so
+  // flattening them into the global scope invents findings that do not apply.
+  '    echo "SOURCE=configfile";',
+  '    printf "%s\\n" "$cfg" | sed -e "s/#.*//" -e "/^[[:space:]]*$/d" | tr -s " \\t" " " | sed -e "s/^ //" | tr "A-Z" "a-z" | sed -e "/^match /q";',
+  '  else',
+  '    echo "SOURCE=unavailable";',
+  '  fi;',
   'fi;',
-  'rm -f /tmp/.sshdT.$$;',
   'echo "===LISTEN===";',
-  'ss -tulnH 2>/dev/null | head -80 || netstat -tuln 2>/dev/null | head -80;',
+  // Braces, not `a || b`: in `ss ... | head || netstat ...` the exit status is
+  // head's (always 0), so the fallback was unreachable and hosts without ss
+  // silently reported no listening ports at all.
+  '{ ss -tulnH 2>/dev/null || netstat -tuln 2>/dev/null; } | head -80;',
   'echo "===FIREWALL===";',
   'for s in ufw firewalld nftables; do st=$(systemctl is-active $s 2>/dev/null); echo "svc:$s=${st:-unknown}"; done;',
   'echo "ufw:$(ufw status 2>/dev/null | head -1)";',
-  'nf=$($T sudo -n nft list ruleset 2>/dev/null | grep -cE \'^[[:space:]]*(tcp|udp|ct|meta) \'); echo "nftrules:${nf:-NA}";',
+  // `grep -c` always prints a number, so ${var:-NA} could never yield NA and a host
+  // without passwordless sudo looked like a host with zero firewall rules. Capture
+  // the command's own exit status instead so "denied" is distinguishable from "zero".
+  'if nftout=$($T sudo -n nft list ruleset 2>/dev/null); then nf=$(printf "%s\\n" "$nftout" | grep -cE \'^[[:space:]]*(tcp|udp|ct|meta) \'); else nf=NA; fi; echo "nftrules:$nf";',
   // Count only INPUT rules, and drop docker/libvirt chains so container plumbing
   // is not mistaken for an actual host firewall policy.
-  'ipt=$($T sudo -n iptables -S INPUT 2>/dev/null | grep \'^-A INPUT\' | grep -cvE \'DOCKER|LIBVIRT|br-|docker0|virbr\'); echo "iptinput:${ipt:-NA}";',
-  'echo "iptpolicy:$($T sudo -n iptables -S INPUT 2>/dev/null | grep \'^-P INPUT\' | awk \'{print $3}\')";',
+  'if iptout=$($T sudo -n iptables -S INPUT 2>/dev/null); then',
+  '  ipt=$(printf "%s\\n" "$iptout" | grep \'^-A INPUT\' | grep -cvE \'DOCKER|LIBVIRT|br-|docker0|virbr\');',
+  '  pol=$(printf "%s\\n" "$iptout" | grep \'^-P INPUT\' | awk \'{print $3}\');',
+  'else ipt=NA; pol=NA; fi;',
+  'echo "iptinput:$ipt"; echo "iptpolicy:${pol:-NA}";',
   'echo "===FAIL2BAN===";',
-  'echo "active=$(systemctl is-active fail2ban 2>/dev/null || echo unknown)";',
+  'f2b=$(systemctl is-active fail2ban 2>/dev/null); echo "active=${f2b:-unknown}";',
   '$T sudo -n fail2ban-client status 2>/dev/null | head -3;',
   'echo "===UPDATES===";',
   'if [ -x /usr/lib/update-notifier/apt-check ]; then echo "aptcheck=$($TL /usr/lib/update-notifier/apt-check 2>&1)";',
@@ -916,16 +942,18 @@ const SECURITY_AUDIT_COMMAND = [
 ].join(' ');
 
 function auditSection(stdout, name) {
-  const match = new RegExp(`===${name}===\\n([\\s\\S]*?)(?:\\n===|$)`).exec(stdout);
+  // Tolerate CRLF: a pty-allocating wrapper or a shell echoing \r would otherwise
+  // make every section come back empty, which reads as a clean bill of health.
+  const match = new RegExp(`===${name}===\\r?\\n([\\s\\S]*?)(?:\\r?\\n===|$)`).exec(stdout);
   return match ? match[1].trim() : '';
 }
 
+// sshd uses the FIRST value it sees for a keyword, not the last.
 function sshdSetting(sshdSection, key) {
   const line = sshdSection
     .split('\n')
     .map(l => l.trim())
-    .filter(l => l.toLowerCase().startsWith(`${key} `))
-    .pop();
+    .find(l => l.toLowerCase().startsWith(`${key} `));
   return line ? line.slice(key.length).trim().toLowerCase() : null;
 }
 
@@ -938,7 +966,10 @@ function parseSecurityAudit(stdout) {
   // SSH daemon configuration
   const sshd = auditSection(stdout, 'SSHD');
   const effective = sshd.includes('SOURCE=effective');
-  const configNote = effective ? '' : ' (설정 파일 기준 — sudo 권한이 없어 실효 설정을 읽지 못했습니다)';
+  const sshdUnavailable = sshd.includes('SOURCE=unavailable') || !sshd;
+  const configNote = effective
+    ? ''
+    : ' (설정 파일 기준 — sudo 권한이 없어 실효 설정을 읽지 못했습니다. Match 블록은 제외했습니다)';
 
   const rootLogin = sshdSetting(sshd, 'permitrootlogin');
   if (rootLogin === 'yes') {
@@ -961,8 +992,12 @@ function parseSecurityAudit(stdout) {
   if (Number.isFinite(maxAuthTries) && maxAuthTries > 6) {
     add('low', 'SSH', '인증 시도 허용 횟수 과다', `MaxAuthTries=${maxAuthTries} 입니다.${configNote}`, `MaxAuthTries ${maxAuthTries}`);
   }
-  if (!sshd) {
-    add('unknown', 'SSH', 'SSH 설정을 읽지 못함', 'sshd 설정을 확인할 수 없었습니다.', null);
+  // The section always carries a SOURCE= line, so emptiness is not the right test —
+  // gate on whether any keyword actually parsed, otherwise an unreadable config
+  // renders identically to a hardened host.
+  if (sshdUnavailable || (rootLogin === null && passwordAuth === null && emptyPasswords === null)) {
+    add('unknown', 'SSH', 'SSH 설정을 읽지 못함',
+      'sshd -T 를 실행할 권한이 없고 /etc/ssh/sshd_config 도 읽지 못했습니다. SSH 항목은 점검되지 않았습니다 — 문제가 없다는 뜻이 아닙니다.', null);
   }
 
   // Listening sockets reachable from outside the host
@@ -1008,23 +1043,36 @@ function parseSecurityAudit(stdout) {
   // Host firewall
   const firewall = auditSection(stdout, 'FIREWALL');
   const activeFw = ['ufw', 'firewalld', 'nftables'].filter(s => new RegExp(`svc:${s}=active`).test(firewall));
-  const nftRules = parseInt((/nftrules:(\d+)/.exec(firewall) || [])[1] || '', 10);
-  const iptInput = parseInt((/iptinput:(\d+)/.exec(firewall) || [])[1] || '', 10);
-  const iptPolicy = (/iptpolicy:(\w+)/.exec(firewall) || [])[1] || '';
-  const probeBlocked = !/nftrules:\d/.test(firewall) && !/iptinput:\d/.test(firewall);
+  const nftRaw = (/nftrules:(\S+)/.exec(firewall) || [])[1] || 'NA';
+  const iptRaw = (/iptinput:(\S+)/.exec(firewall) || [])[1] || 'NA';
+  const iptPolicy = (/iptpolicy:(\S+)/.exec(firewall) || [])[1] || 'NA';
+  const nftRules = parseInt(nftRaw, 10);
+  const iptInput = parseInt(iptRaw, 10);
+  // The probes report NA when sudo refused, which is not the same as "zero rules".
+  // Conflating the two used to emit a false high "firewall active but empty" on every
+  // host without passwordless sudo.
+  const probeBlocked = !Number.isFinite(nftRules) && !Number.isFinite(iptInput);
   const hasHostRules = (Number.isFinite(nftRules) && nftRules > 0) || (Number.isFinite(iptInput) && iptInput > 0);
   // A handful of INPUT rules with a default-ACCEPT policy is not a firewall — that is
   // what fail2ban alone looks like. Default-deny is what actually gates traffic.
   const defaultDeny = /^(DROP|REJECT)$/i.test(iptPolicy);
+  const policyKnown = iptPolicy !== 'NA';
 
-  if (probeBlocked && !activeFw.length) {
-    add('unknown', '방화벽', '방화벽 상태 확인 불가', 'sudo 권한이 없어 규칙을 읽지 못했고, 활성화된 방화벽 서비스도 찾지 못했습니다.', null);
-  } else if (!activeFw.length && !defaultDeny) {
+  if (probeBlocked) {
+    add(activeFw.length ? 'low' : 'unknown', '방화벽',
+      activeFw.length ? '방화벽 규칙 확인 불가' : '방화벽 상태 확인 불가',
+      activeFw.length
+        ? `${activeFw.join(', ')} 서비스는 동작 중이지만, sudo 권한이 없어 실제 규칙과 기본 정책을 확인하지 못했습니다.`
+        : 'sudo 권한이 없어 규칙을 읽지 못했고, 활성화된 방화벽 서비스도 찾지 못했습니다. 방화벽이 없다는 뜻이 아니라 점검이 안 된 상태입니다.',
+      firewall.split('\n').filter(l => l.startsWith('svc:')).join(' '));
+  } else if (!activeFw.length && policyKnown && !defaultDeny) {
     add('medium', '방화벽', '호스트 방화벽 없음 (기본 정책 ACCEPT)',
-      `동작 중인 방화벽 서비스가 없고 INPUT 기본 정책이 ${iptPolicy || 'ACCEPT'}입니다. docker/libvirt를 제외한 INPUT 규칙 ${Number.isFinite(iptInput) ? iptInput : 0}건은 fail2ban 등이 넣은 것으로 기본 차단 역할을 하지 못합니다. 클라우드 보안 그룹에만 의존하면 규칙 오설정 시 전면 노출됩니다.`,
-      `${firewall.split('\n').filter(l => l.startsWith('svc:')).join(' ')} INPUT정책=${iptPolicy || '?'} 규칙=${iptInput}`);
-  } else if (activeFw.length && !hasHostRules) {
-    add('high', '방화벽', '방화벽은 켜져 있으나 규칙이 비어 있음', `${activeFw.join(', ')} 서비스는 active인데 실제 필터 규칙이 0건입니다. 차단이 동작하지 않습니다.`, `nft=${nftRules} INPUT=${iptInput}`);
+      `동작 중인 방화벽 서비스가 없고 INPUT 기본 정책이 ${iptPolicy}입니다. docker/libvirt를 제외한 INPUT 규칙 ${Number.isFinite(iptInput) ? iptInput : 0}건은 fail2ban 등이 넣은 것으로 기본 차단 역할을 하지 못합니다. 클라우드 보안 그룹에만 의존하면 규칙 오설정 시 전면 노출됩니다.`,
+      `${firewall.split('\n').filter(l => l.startsWith('svc:')).join(' ')} INPUT정책=${iptPolicy} 규칙=${iptRaw}`);
+  } else if (activeFw.length && !hasHostRules && policyKnown && !defaultDeny) {
+    add('high', '방화벽', '방화벽은 켜져 있으나 규칙이 비어 있음',
+      `${activeFw.join(', ')} 서비스는 active인데 필터 규칙이 0건이고 INPUT 기본 정책도 ${iptPolicy}입니다. 차단이 동작하지 않습니다.`,
+      `nft=${nftRaw} INPUT=${iptRaw} 정책=${iptPolicy}`);
   }
 
   // fail2ban
@@ -1088,7 +1136,8 @@ function parseSecurityAudit(stdout) {
     }
     const pk = /^privkey:(.+):(\d+)$/.exec(line.trim());
     if (pk) {
-      const tooOpen = !/^[0-6]00$/.test(pk[2]);
+      // Only group/other bits matter; 700 is owner-only and perfectly fine.
+      const tooOpen = /[1-7]/.test(pk[2].slice(-2));
       add(tooOpen ? 'high' : 'low', '권한', tooOpen ? '개인키 권한 과다' : '서버에 개인키 파일 존재',
         tooOpen
           ? `${pk[1]} 권한이 ${pk[2]} 입니다. 600으로 낮추세요.`
@@ -1165,39 +1214,28 @@ app.post('/api/servers/:id/audit', (req, res) => {
     return res.status(400).json({ error: e.message });
   }
 
-  const sshClient = new Client();
-  let settled = false;
-  const finish = (payload) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    try { sshClient.end(); } catch { /* already closed */ }
-    res.json(payload);
-  };
-  const timer = setTimeout(() => finish({ success: false, error: '점검이 60초 안에 끝나지 않아 중단했습니다.' }), 60000);
+  runSshCommand(sshConfig, SECURITY_AUDIT_COMMAND, { timeoutMs: 75000 }, (err, out) => {
+    if (err) return res.json({ success: false, error: err.message });
 
-  sshClient.on('ready', () => {
-    sshClient.exec(SECURITY_AUDIT_COMMAND, (err, stream) => {
-      if (err) return finish({ success: false, error: `명령 실행 실패: ${err.message}` });
-
-      let stdout = '';
-      stream.on('data', (data) => {
-        if (stdout.length < 512 * 1024) stdout += data.toString();
-      });
-      stream.stderr.on('data', () => { /* probes are expected to fail without sudo */ });
-      stream.on('close', () => {
-        try {
-          finish({ success: true, server: { id: conn.id, name: conn.name, host: conn.host }, ...parseSecurityAudit(stdout) });
-        } catch (e) {
-          console.error('Audit parse error:', e);
-          finish({ success: false, error: `점검 결과를 해석하지 못했습니다: ${e.message}` });
-        }
-      });
-    });
+    try {
+      const report = parseSecurityAudit(out.stdout);
+      // Never let a truncated probe read as a complete audit.
+      if (out.truncated) {
+        report.findings.unshift({
+          severity: 'unknown',
+          category: '점검',
+          title: '점검 출력이 잘렸습니다',
+          detail: '원격 서버의 출력이 512KB를 넘어 뒷부분을 버렸습니다. 일부 항목은 점검되지 않았을 수 있습니다.',
+          evidence: null
+        });
+        report.counts.unknown = (report.counts.unknown || 0) + 1;
+      }
+      res.json({ success: true, server: { id: conn.id, name: conn.name, host: conn.host }, ...report });
+    } catch (e) {
+      console.error('Audit parse error:', e);
+      res.json({ success: false, error: `점검 결과를 해석하지 못했습니다: ${e.message}` });
+    }
   });
-
-  sshClient.on('error', (err) => finish({ success: false, error: err.message }));
-  sshClient.connect(sshConfig);
 });
 
 // Auth API Endpoints
@@ -1382,18 +1420,24 @@ app.post('/api/update-profile', (req, res) => {
     return res.status(400).json({ error: 'Current password does not match.' });
   }
 
-  authConfig.username = newUsername;
-
-  if (newPassword) {
-    if (newPassword.length < 12) {
-      return res.status(400).json({ error: 'New password must be at least 12 characters.' });
-    }
-    const newSalt = crypto.randomBytes(16).toString('hex');
-    const newHash = hashPassword(newPassword, newSalt);
-    authConfig.salt = newSalt;
-    authConfig.hash = newHash;
-    authConfig.iterations = PASSWORD_ITERATIONS;
+  // Validate everything before touching live state. The username used to be assigned
+  // before the password-length check, so rejecting a short password left the in-memory
+  // username changed but nothing persisted — login then needed the new username with
+  // the old password, and a restart silently reverted it.
+  if (newPassword && newPassword.length < 12) {
+    return res.status(400).json({ error: 'New password must be at least 12 characters.' });
   }
+
+  const next = { ...authConfig, username: newUsername };
+  if (newPassword) {
+    const newSalt = crypto.randomBytes(16).toString('hex');
+    next.salt = newSalt;
+    next.hash = hashPassword(newPassword, newSalt);
+    next.iterations = PASSWORD_ITERATIONS;
+  }
+
+  writeJsonSecure(AUTH_FILE, next);
+  authConfig = next;
 
   // Update Portal Name if provided
   if (portalName) {
@@ -1401,7 +1445,6 @@ app.post('/api/update-profile', (req, res) => {
     writeJsonSecure(CONFIG_FILE, appConfig);
   }
 
-  writeJsonSecure(AUTH_FILE, authConfig);
   activeSessions.clear();
 
   res.json({ success: true });
@@ -1428,8 +1471,8 @@ wss.on('connection', (ws, req) => {
   }
   const urlParams = new URL(req.url, `http://${req.headers.host}`);
   const id = urlParams.searchParams.get('id');
-  const termCols = parseInt(urlParams.searchParams.get('cols'), 10) || 80;
-  const termRows = parseInt(urlParams.searchParams.get('rows'), 10) || 24;
+  const termCols = clampTermCols(urlParams.searchParams.get('cols'));
+  const termRows = clampTermRows(urlParams.searchParams.get('rows'));
 
   // Authenticate WebSocket Session
   const cookies = req.headers.cookie || '';
@@ -1492,28 +1535,44 @@ wss.on('connection', (ws, req) => {
 
       ws.send(JSON.stringify({ type: 'status', message: 'Shell connected.' }));
 
-      // Data from SSH to WebSocket
+      // Data from SSH to WebSocket.
+      // ssh2 emits one event per SSH packet, so chunk boundaries fall at arbitrary
+      // byte offsets. A Hangul syllable is 3 bytes in UTF-8, so a plain
+      // data.toString('utf-8') turns any syllable straddling a boundary into U+FFFD.
+      // That also desyncs xterm's column accounting (Hangul is 2 cells wide, U+FFFD
+      // is 1), which shears the whole screen. StringDecoder holds back the
+      // incomplete trailing sequence until the next chunk completes it.
+      const decoder = new StringDecoder('utf8');
       stream.on('data', (data) => {
-        ws.send(JSON.stringify({ type: 'data', data: data.toString('utf-8') }));
+        const text = decoder.write(data);
+        if (text) ws.send(JSON.stringify({ type: 'data', data: text }));
       });
 
       stream.on('close', () => {
+        const tail = decoder.end();
+        if (tail) ws.send(JSON.stringify({ type: 'data', data: tail }));
         ws.send(JSON.stringify({ type: 'status', message: '\r\nConnection closed by remote host.' }));
         ws.close();
       });
 
-      // Data from WebSocket to SSH
+      // Data from WebSocket to SSH.
+      // Parsing and dispatch are kept apart: sharing one try/catch meant a control
+      // frame that threw during dispatch fell through to the raw-write fallback and
+      // typed its own JSON into the interactive shell.
       ws.on('message', (message) => {
+        let parsed = null;
         try {
-          const parsed = JSON.parse(message);
-          if (parsed.type === 'data') {
-            stream.write(parsed.data);
-          } else if (parsed.type === 'resize') {
-            stream.setWindow(parsed.rows, parsed.cols, 0, 0);
-          }
-        } catch (e) {
-          // If not valid JSON, write as raw data
+          parsed = JSON.parse(message);
+        } catch {
           stream.write(message);
+          return;
+        }
+        if (!parsed || typeof parsed !== 'object') return;
+
+        if (parsed.type === 'data') {
+          if (typeof parsed.data === 'string') stream.write(parsed.data);
+        } else if (parsed.type === 'resize') {
+          stream.setWindow(clampTermRows(parsed.rows), clampTermCols(parsed.cols), 0, 0);
         }
       });
 

@@ -117,17 +117,46 @@ function setupEventListeners() {
   document.getElementById('audit-close-btn').addEventListener('click', closeAuditModal);
   document.getElementById('audit-done-btn').addEventListener('click', closeAuditModal);
   document.getElementById('audit-copy-btn').addEventListener('click', copyAuditReport);
+
+  // Escape and backdrop close. Without these, a modal taller than the viewport (a phone
+  // in landscape, where no mobile media query applies) put its close button off-screen
+  // with no way to scroll to it — a dead end needing a page reload.
+  const overlays = [
+    { id: 'audit-modal', close: closeAuditModal },
+    { id: 'server-modal', close: closeModal },
+    { id: 'password-modal', close: closePwdModal }
+  ];
+  overlays.forEach(({ id, close }) => {
+    const overlay = document.getElementById(id);
+    if (!overlay) return;
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) close();
+    });
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    const open = overlays.find(({ id }) => document.getElementById(id)?.classList.contains('active'));
+    if (open) open.close();
+  });
 }
 
 // Fetch Server Profiles
 async function fetchServers() {
   try {
     const res = await fetch('/api/servers');
-    servers = await res.json();
-    
+    if (!res.ok) {
+      // On 401 the fetch interceptor navigates away, but execution continues here —
+      // without this guard `servers` became {error:...} and renderServerCards threw.
+      console.warn('Failed to fetch servers: HTTP', res.status);
+      return;
+    }
+    const data = await res.json();
+    servers = Array.isArray(data) ? data : [];
+
     // Update Stats
     document.getElementById('total-servers-count').innerText = servers.length;
-    
+
     renderServerCards();
     checkAllServersStatus();
   } catch (err) {
@@ -177,7 +206,11 @@ function renderServerCards() {
 
     const groupHeader = document.createElement('h2');
     groupHeader.className = 'group-header';
-    groupHeader.setAttribute('onclick', `toggleGroup('${escapeHtml(groupName).replace(/'/g, "\\'")}', '${safeGroupId}')`);
+    // A closure instead of an inline onclick string. setAttribute does no entity
+    // decoding, so the handler received the *escaped* name — a group called "A&B"
+    // stored "A&amp;B" in localStorage and its collapsed state never restored, and a
+    // trailing backslash produced a one-argument call that silently did nothing.
+    groupHeader.addEventListener('click', (event) => toggleGroup(groupName, safeGroupId, event));
     groupHeader.innerHTML = `
       <i data-lucide="chevron-down" class="group-chevron ${isCollapsed ? 'collapsed' : ''}" id="chevron-${safeGroupId}"></i>
       <span>${escapeHtml(groupName)}</span>
@@ -194,8 +227,10 @@ function renderServerCards() {
       card.id = `server-card-${server.id}`;
 
       let badgesHtml = '';
-      if (server.os) badgesHtml += `<span class="badge badge-os">${server.os}</span>`;
-      if (server.spec) badgesHtml += `<span class="badge badge-spec">${server.spec}</span>`;
+      // os/spec are read off the remote host (/etc/os-release, nproc, df), so they are
+      // attacker-controlled if any managed server is compromised. Must be escaped.
+      if (server.os) badgesHtml += `<span class="badge badge-os">${escapeHtml(server.os)}</span>`;
+      if (server.spec) badgesHtml += `<span class="badge badge-spec">${escapeHtml(server.spec)}</span>`;
       badgesHtml += `<span class="badge badge-auth">${server.authType === 'key' ? 'Key File' : 'Password'}</span>`;
 
       card.innerHTML = `
@@ -433,8 +468,11 @@ function connectToSSH(id) {
   const server = servers.find(s => s.id === id);
   if (!server) return;
 
+  // Always tear down any previous session first — reconnect comes through here too.
+  disposeSession();
+
   currentConnectingServerId = id;
-  
+
   // Hide exit overlay on fresh connection
   document.getElementById('terminal-exit-overlay').classList.add('hidden');
   document.getElementById('terminal-status-dot').className = 'status-indicator-green pulse';
@@ -449,8 +487,11 @@ function connectToSSH(id) {
   // Create terminal
   const term = new Terminal({
     cursorBlink: true,
-    fontFamily: '"Fira Code", monospace, Courier-New',
-    fontSize: 14,
+    // Fira Code has no Hangul glyphs, so Korean fell through to an arbitrary system
+    // font. Name real CJK monospace faces so the fallback is predictable.
+    fontFamily: '"Fira Code", "D2Coding", "Noto Sans Mono CJK KR", "Apple SD Gothic Neo", "Malgun Gothic", "Courier New", monospace',
+    // 14px only yields ~42 columns on a 390px phone.
+    fontSize: window.innerWidth < 480 ? 11 : 14,
     theme: {
       background: '#181b2d',
       foreground: '#f8fafc',
@@ -484,6 +525,13 @@ function connectToSSH(id) {
     activeSocket = socket;
 
     socket.onopen = () => {
+      // Re-fit and re-send geometry here rather than racing it with a timer. The old
+      // code fired one corrective resize 50ms after the socket was created, which was
+      // usually still CONNECTING, so the readyState guard silently dropped it and the
+      // PTY stayed at whatever the initial (often wrong) size was for the whole session.
+      fitAddon.fit();
+      socket.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+
       // Connect term handler
       term.onData(data => {
         if (socket.readyState === WebSocket.OPEN) {
@@ -531,14 +579,14 @@ function connectToSSH(id) {
     };
 
     // Keep handle of resize event
-    resizeHandler = () => {
+    const applyViewport = () => {
       // Handle mobile keyboard visual viewport sizing
       if (window.visualViewport) {
         const modal = document.getElementById('terminal-modal');
         modal.style.height = `${window.visualViewport.height}px`;
         modal.style.top = `${window.visualViewport.offsetTop}px`;
       }
-      
+
       fitAddon.fit();
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
@@ -548,35 +596,50 @@ function connectToSSH(id) {
         }));
       }
     };
+
+    // visualViewport 'scroll' fires continuously while scrolling on mobile, and each
+    // firing sent a window-change and forced a full reflow. Debounce it.
+    let resizeTimer = null;
+    resizeHandler = () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(applyViewport, 100);
+    };
+
     window.addEventListener('resize', resizeHandler);
+    window.addEventListener('orientationchange', resizeHandler);
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', resizeHandler);
       window.visualViewport.addEventListener('scroll', resizeHandler);
-      // Trigger resize for proper initial size calculations
-      setTimeout(resizeHandler, 50);
     }
+    applyViewport();
   }, 100);
 }
 
-// Close SSH Terminal
-function closeTerminal() {
+// Tear down the current SSH session without leaving the terminal view.
+// Reconnect used to call connectToSSH() directly, which only blanked the container: the
+// old Terminal was never disposed and its resize handlers stayed registered on window
+// and visualViewport, so every reconnect leaked a terminal and stacked three more live
+// listeners firing fit() on a detached instance.
+function disposeSession() {
   if (resizeHandler) {
     window.removeEventListener('resize', resizeHandler);
+    window.removeEventListener('orientationchange', resizeHandler);
     if (window.visualViewport) {
       window.visualViewport.removeEventListener('resize', resizeHandler);
       window.visualViewport.removeEventListener('scroll', resizeHandler);
     }
     resizeHandler = null;
   }
-  
+
   // Reset mobile viewport styles
   const modal = document.getElementById('terminal-modal');
   if (modal) {
     modal.style.height = '';
     modal.style.top = '';
   }
-  
+
   if (activeSocket) {
+    activeSocket.onclose = null; // don't let teardown trigger the exit overlay
     activeSocket.close();
     activeSocket = null;
   }
@@ -585,16 +648,24 @@ function closeTerminal() {
     activeTerminal.dispose();
     activeTerminal = null;
   }
+}
 
+// Close SSH Terminal
+function closeTerminal() {
+  disposeSession();
   terminalModal.classList.remove('active');
   // Refresh server status when returning to dashboard
   checkAllServersStatus();
 }
 
-// Helper to escape HTML tags
-function escapeHtml(str) {
-  if (!str) return '';
-  return str
+// Helper to escape HTML tags.
+// Coerces instead of assuming a string: a number/object reaching the old version threw
+// "str.replace is not a function", and because renderServerCards had already cleared
+// the grid, one bad stored record left the dashboard permanently blank with no UI to
+// delete it. escapeHtml(0) also used to return '' and drop a legitimate value.
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -934,8 +1005,8 @@ async function diagnoseServer(serverId, event) {
         const badgesContainer = card.querySelector('.card-badges');
         if (badgesContainer) {
           let badgesHtml = '';
-          if (data.os) badgesHtml += `<span class="badge badge-os">${data.os}</span>`;
-          if (data.spec) badgesHtml += `<span class="badge badge-spec">${data.spec}</span>`;
+          if (data.os) badgesHtml += `<span class="badge badge-os">${escapeHtml(data.os)}</span>`;
+          if (data.spec) badgesHtml += `<span class="badge badge-spec">${escapeHtml(data.spec)}</span>`;
           badgesHtml += `<span class="badge badge-auth">${servers[serverIdx].authType === 'key' ? 'Key File' : 'Password'}</span>`;
           badgesContainer.innerHTML = badgesHtml;
         }
@@ -984,14 +1055,33 @@ const SEVERITY_META = {
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'unknown'];
 
 let lastAuditReports = [];
+// Guards against overlapping sweeps: a second click used to launch another full set of
+// SSH connections, and a single-server audit started mid-sweep would be overwritten by
+// the sweep's results under whatever title was on screen.
+let auditRunId = 0;
+let auditInFlight = false;
+
+// The portal is HTTP/1.1, so the browser caps ~6 requests per origin. Auditing every
+// server at once starved /ping, icons and every other request behind 60s SSH probes.
+const AUDIT_CONCURRENCY = 3;
+
+function setAuditButtonsDisabled(disabled) {
+  const all = document.getElementById('audit-all-btn');
+  if (all) all.disabled = disabled;
+  document.querySelectorAll('.btn-audit').forEach(b => { b.disabled = disabled; });
+}
 
 function openAuditModal(title) {
   document.getElementById('audit-modal-title').innerText = title;
   document.getElementById('audit-modal').classList.add('active');
+  // Stale results must not be copyable while a new run is pending.
+  lastAuditReports = [];
+  document.body.style.overflow = 'hidden';
 }
 
 function closeAuditModal() {
   document.getElementById('audit-modal').classList.remove('active');
+  document.body.style.overflow = '';
 }
 
 function renderAuditPending(names) {
@@ -1083,7 +1173,12 @@ function renderAuditReports(reports) {
 async function runAudit(server) {
   try {
     const res = await fetch(`/api/servers/${server.id}/audit`, { method: 'POST' });
-    const data = await res.json();
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      return { success: false, serverName: server.name, error: `응답을 해석할 수 없습니다 (HTTP ${res.status})` };
+    }
     if (!res.ok) return { success: false, serverName: server.name, error: data.error || `HTTP ${res.status}` };
     return { ...data, serverName: server.name };
   } catch (err) {
@@ -1092,48 +1187,112 @@ async function runAudit(server) {
   }
 }
 
+// Replace one spinner row in place as its audit lands, so a slow host does not hold
+// every other row spinning.
+function settlePendingRow(server, report) {
+  const row = document.getElementById(`audit-pending-${server.id}`);
+  if (!row) return;
+  const ok = report.success;
+  const counts = ok ? (report.counts || {}) : null;
+  const summary = ok
+    ? (Object.keys(counts).length ? SEVERITY_ORDER.filter(s => counts[s]).map(s => `${SEVERITY_META[s].label} ${counts[s]}`).join(' · ') : '문제 없음')
+    : `실패 — ${report.error || '알 수 없는 오류'}`;
+  row.innerHTML = `<i data-lucide="${ok ? 'check' : 'x'}" style="width:14px;height:14px;color:${ok ? 'var(--color-online)' : 'var(--color-offline)'}"></i>
+    <span>${escapeHtml(server.name)} — ${escapeHtml(summary)}</span>`;
+  lucide.createIcons();
+}
+
+// Run tasks with a bounded number in flight at once.
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
 async function auditServer(id) {
   const server = servers.find(s => s.id === id);
-  if (!server) return;
+  if (!server || auditInFlight) return;
 
+  const runId = ++auditRunId;
+  auditInFlight = true;
+  setAuditButtonsDisabled(true);
   openAuditModal(`보안 점검 — ${server.name}`);
   renderAuditPending([{ id: server.id, name: server.name }]);
 
-  const report = await runAudit(server);
-  lastAuditReports = [report];
-  renderAuditReports(lastAuditReports);
+  try {
+    const report = await runAudit(server);
+    if (runId !== auditRunId) return; // a newer run superseded this one
+    lastAuditReports = [report];
+    renderAuditReports(lastAuditReports);
+  } finally {
+    if (runId === auditRunId) {
+      auditInFlight = false;
+      setAuditButtonsDisabled(false);
+    }
+  }
 }
 
 async function auditAllServers() {
+  if (auditInFlight) return;
+
   if (!servers.length) {
     openAuditModal('보안 점검');
     renderAuditReports([]);
     return;
   }
 
+  const runId = ++auditRunId;
+  auditInFlight = true;
+  setAuditButtonsDisabled(true);
   openAuditModal(`보안 점검 — 전체 ${servers.length}대`);
   renderAuditPending(servers.map(s => ({ id: s.id, name: s.name })));
 
-  // Audit every server in parallel; each row resolves independently.
-  const reports = await Promise.all(servers.map(runAudit));
-  lastAuditReports = reports;
-  renderAuditReports(reports);
+  try {
+    const targets = servers.slice();
+    const reports = await runWithConcurrency(targets, AUDIT_CONCURRENCY, async (server) => {
+      const report = await runAudit(server);
+      if (runId === auditRunId) settlePendingRow(server, report);
+      return report;
+    });
+    if (runId !== auditRunId) return;
+    lastAuditReports = reports;
+    renderAuditReports(reports);
+  } finally {
+    if (runId === auditRunId) {
+      auditInFlight = false;
+      setAuditButtonsDisabled(false);
+    }
+  }
 }
 
 function buildAuditText() {
+  if (!lastAuditReports.length) return '점검 결과가 없습니다.';
   return lastAuditReports.map(r => {
-    if (!r.success) return `## ${r.serverName}\n점검 실패: ${r.error}\n`;
-    const lines = r.findings.length
-      ? r.findings.map(f => `- [${SEVERITY_META[f.severity].label}] (${f.category}) ${f.title}\n  ${f.detail}${f.evidence ? `\n  근거: ${f.evidence}` : ''}`).join('\n')
+    if (!r || !r.success) return `## ${r ? r.serverName : '알 수 없음'}\n점검 실패: ${r ? r.error : '결과 없음'}\n`;
+    const lines = (r.findings || []).length
+      ? r.findings.map(f => {
+          const meta = SEVERITY_META[f.severity] || SEVERITY_META.unknown;
+          return `- [${meta.label}] (${f.category}) ${f.title}\n  ${f.detail}${f.evidence ? `\n  근거: ${f.evidence}` : ''}`;
+        }).join('\n')
       : '- 발견된 문제 없음';
     return `## ${r.serverName} (${r.host})\n점검 시각: ${r.checkedAt}\n${lines}\n`;
   }).join('\n');
 }
 
+// Remembering the label across clicks would capture "복사됨" on a fast second click and
+// never restore, so keep the original text as a constant.
+const AUDIT_COPY_LABEL = '보고서 복사';
+let auditCopyTimer = null;
+
 async function copyAuditReport() {
-  const btn = document.getElementById('audit-copy-btn');
-  const label = btn.querySelector('span');
-  const original = label.innerText;
+  const label = document.getElementById('audit-copy-btn').querySelector('span');
   try {
     await navigator.clipboard.writeText(buildAuditText());
     label.innerText = '복사됨';
@@ -1141,5 +1300,6 @@ async function copyAuditReport() {
     console.error('Clipboard error:', err);
     label.innerText = '복사 실패';
   }
-  setTimeout(() => { label.innerText = original; }, 1500);
+  clearTimeout(auditCopyTimer);
+  auditCopyTimer = setTimeout(() => { label.innerText = AUDIT_COPY_LABEL; }, 1500);
 }
