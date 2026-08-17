@@ -1338,7 +1338,7 @@ app.post('/api/update-profile', (req, res) => {
   if (typeof portalName !== 'string' || !portalName.trim()) {
     return res.status(400).json({ error: '포털 이름을 입력하세요.' });
   }
-  if (portalName.length > 60) {
+  if (portalName.trim().length > 60) {
     return res.status(400).json({ error: '포털 이름은 60자 이내여야 합니다.' });
   }
 

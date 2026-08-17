@@ -178,10 +178,16 @@ docker compose up -d
 저장된 비밀번호가 없으므로 UI로 복구할 수 없습니다. 복구는 환경변수를 고치고 재시작하는 것뿐입니다.
 
 ```bash
+# 컨테이너 이름은 배포 방식에 따라 다릅니다:
+#   docker-compose.yml       → ssh-connect
+#   docker-compose.prod.yml  → web-ssh
 docker logs ssh-connect | tail -20        # 부족한 설정이 무엇인지 확인
 $EDITOR .env                              # GOOGLE_* 수정
 docker compose up -d                      # 재시작
 ```
+
+설정이 잘못된 채 `restart: unless-stopped`로 올리면 기동 거부가 **재시작 루프**로 나타납니다.
+서비스가 계속 내려가 있으면 먼저 위 로그를 확인하세요 — 부족한 환경변수가 그대로 출력됩니다.
 
 흔한 원인은 GCP 콘솔의 승인된 리디렉션 URI가 `GOOGLE_REDIRECT_URI`와 한 글자라도 다른 경우
 (`redirect_uri_mismatch`)와, 로그인하려는 계정이 허용 목록에 없는 경우(`?error=google_forbidden`)입니다.

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'web-ssh-v8';
+const CACHE_NAME = 'web-ssh-v9';
 
 // HTML is deliberately NOT precached. `/` and `/index.html` sit behind requireAuth, so
 // precaching them while the session is expired stored the *login page* under `/` — after
@@ -6,8 +6,8 @@ const CACHE_NAME = 'web-ssh-v8';
 // previous deploy's HTML for one whole launch, so a newly shipped feature appeared to be
 // missing until the app was reopened.
 const ASSETS = [
-  '/style.css?v=13',
-  '/app.js?v=13',
+  '/style.css?v=14',
+  '/app.js?v=14',
   '/icon.jpg',
   'https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap',
   'https://unpkg.com/lucide@latest',
