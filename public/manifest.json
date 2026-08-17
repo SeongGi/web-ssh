@@ -2,7 +2,9 @@
   "name": "Web-SSH Portal",
   "short_name": "WebSSH",
   "description": "Premium Web SSH Client and Server Connection Manager",
+  "lang": "ko",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#0e122b",
   "theme_color": "#0e122b",
@@ -11,14 +13,8 @@
     {
       "src": "/icon.jpg",
       "type": "image/jpeg",
-      "sizes": "512x512",
+      "sizes": "1024x1024",
       "purpose": "any"
-    },
-    {
-      "src": "/icon.jpg",
-      "type": "image/jpeg",
-      "sizes": "512x512",
-      "purpose": "maskable"
     }
   ]
 }

@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Web-SSH Portal</title>
   <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -13,7 +13,7 @@
   <!-- xterm.css -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
   <!-- Custom CSS -->
-  <link rel="stylesheet" href="style.css?v=12">
+  <link rel="stylesheet" href="style.css?v=13">
   <!-- PWA Manifest -->
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#0e122b">
@@ -253,11 +253,16 @@
             <span class="terminal-title" id="terminal-server-title"></span>
           </div>
           <div class="terminal-actions">
-            <button class="btn btn-icon" id="terminal-clear" title="화면 비우기">
-              <i data-lucide="trash-2"></i>
+            <!-- Labeled, not icon-only: `title` never appears on touch, and the old
+                 trash-2 / log-out icons were the same glyphs used for "delete server"
+                 and "log out of the portal", so their meaning was actively misleading. -->
+            <button class="btn btn-icon-text" id="terminal-clear" aria-label="터미널 화면 지우기" title="터미널 화면 지우기">
+              <i data-lucide="eraser"></i>
+              <span>화면 지우기</span>
             </button>
-            <button class="btn btn-icon" id="terminal-close-btn" title="세션 종료">
-              <i data-lucide="log-out"></i>
+            <button class="btn btn-icon-text btn-end-session" id="terminal-close-btn" aria-label="SSH 세션 종료" title="SSH 세션 종료">
+              <i data-lucide="power"></i>
+              <span>세션 종료</span>
             </button>
           </div>
         </header>
@@ -294,7 +299,7 @@
   <!-- xterm-addon-fit script -->
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <!-- Custom JS -->
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=13"></script>
   <!-- PWA Service Worker Registration -->
   <script>
     if ('serviceWorker' in navigator) {

@@ -1373,3 +1373,218 @@ select option {
   .audit-finding-cat { margin-left: 0; }
   .audit-finding-head { flex-wrap: wrap; }
 }
+
+/* ==========================================================================
+   UI fixes — layout, touch, safe areas
+   Appended so these rules win over the earlier declarations they correct.
+   ========================================================================== */
+
+/* --- Card footer: the third action button (점검) pushed the row past the card
+       width at every size above 480px, squashing the Korean labels into vertical
+       single-character columns. Let it wrap instead of squashing. --- */
+.card-footer {
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.card-actions {
+  flex-wrap: wrap;
+}
+.card-actions .btn,
+.card-footer .btn-connect {
+  white-space: nowrap;
+}
+/* .btn-icon-text i {width:16px} never matched .btn.btn-primary.btn-connect, so this
+   icon was rendering at lucide's default 24px and eating horizontal space. */
+.btn-connect i {
+  width: 16px;
+  height: 16px;
+}
+
+/* --- Modals: cap height at ALL widths. The 90vh/overflow rule only existed inside
+       @media (max-width: 768px), so a phone in landscape (852x393 -> 769px+) got no
+       cap at all: the audit card rendered ~463px tall in a 393px viewport with its
+       close button clipped off-screen and no way to scroll to it. --- */
+.modal-overlay {
+  align-items: flex-start;
+  overflow-y: auto;
+  padding: 1rem 0;
+  width: 100%;
+  inset: 0;
+}
+.modal-card {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 2rem);
+  margin: auto;
+}
+.modal-header,
+.modal-footer {
+  flex-shrink: 0;
+}
+/* One scroller, not two nested ones. */
+.modal-card > form,
+.audit-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.audit-body {
+  max-height: none;
+}
+
+/* --- Terminal --- */
+.terminal-overlay {
+  width: 100%;
+  inset: 0;
+  height: 100dvh;
+}
+/* A long user@host:port used to overflow the header instead of ellipsizing. */
+.terminal-info {
+  min-width: 0;
+}
+.terminal-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.btn-end-session {
+  color: var(--color-offline);
+}
+
+/* --- Audit findings: keep the severity icon from being squashed by a long title,
+       and top-align it since titles wrap to two lines on a phone. --- */
+.audit-finding-head > svg {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 0.1rem;
+}
+/* break-all splits Korean mid-word; anywhere breaks more gracefully. */
+.audit-evidence {
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+/* --- Card text overflow --- */
+.server-title {
+  min-width: 0;
+}
+.status-wrapper {
+  flex-shrink: 0;
+}
+.server-host-info span {
+  overflow-wrap: anywhere;
+}
+
+/* --- Touch: hover states latch after a tap on iOS, leaving cards lifted and the
+       modal close button stuck rotated. Scope every transform-on-hover to real
+       pointers and give touch an :active equivalent instead. --- */
+@media (hover: none) {
+  .server-card:hover,
+  .add-card:hover,
+  .btn:hover,
+  .btn-close:hover,
+  .stat-card:hover,
+  .group-header:hover {
+    transform: none;
+  }
+  .server-card:active {
+    border-color: var(--glass-border-hover);
+  }
+  .btn:active {
+    filter: brightness(1.15);
+  }
+}
+.btn,
+.specs-toggle-link,
+.group-header,
+.btn-close {
+  -webkit-tap-highlight-color: rgba(139, 92, 246, 0.2);
+}
+
+@media (max-width: 768px) {
+  /* iOS auto-zooms the whole page when a focused field is under 16px, and never
+     zooms back — which also pushes the modal partly off-screen. */
+  input[type="text"],
+  input[type="number"],
+  input[type="password"],
+  input[type="email"],
+  textarea,
+  select {
+    font-size: 16px;
+  }
+
+  /* 44px minimum touch targets. */
+  .btn,
+  .btn-icon,
+  .btn-close {
+    min-height: 44px;
+  }
+  .btn-icon,
+  .btn-close {
+    min-width: 44px;
+  }
+  .btn-close {
+    padding: 0.6rem;
+    margin: -0.6rem -0.6rem -0.6rem 0;
+  }
+  .btn-xs {
+    min-height: 36px;
+  }
+  .specs-toggle-link {
+    padding: 0.5rem 0;
+  }
+
+  /* Stack card actions here rather than only below 480px — the footer no longer
+     fits from 768px down. */
+  .card-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .card-actions {
+    display: flex;
+  }
+  .card-actions .btn {
+    flex: 1;
+  }
+
+  /* Keep the terminal header on one row; stacking it cost ~90px of terminal height
+     with the soft keyboard open. */
+  .terminal-header {
+    flex-direction: row;
+    align-items: center;
+  }
+  .terminal-body {
+    padding: 0.25rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .stats-bar {
+    gap: 0.75rem;
+  }
+  .stat-card {
+    flex: 1 1 0;
+    padding: 0.75rem 1rem;
+  }
+  .stats-bar .btn {
+    flex: 1 1 100%;
+  }
+}
+
+/* --- Installed PWA runs full-screen under the notch/status bar because of
+       apple-mobile-web-app-status-bar-style=black-translucent. --- */
+@supports (padding: env(safe-area-inset-top)) {
+  .app-container {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+  .app-header {
+    padding-top: env(safe-area-inset-top);
+  }
+  .terminal-header {
+    padding-top: max(0.75rem, env(safe-area-inset-top));
+  }
+  .terminal-body {
+    padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
+  }
+}

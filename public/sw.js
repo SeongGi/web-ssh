@@ -1,11 +1,13 @@
-// Bumped so installed PWAs pick up the login page with the Google sign-in button.
-const CACHE_NAME = 'web-ssh-v7';
+const CACHE_NAME = 'web-ssh-v8';
+
+// HTML is deliberately NOT precached. `/` and `/index.html` sit behind requireAuth, so
+// precaching them while the session is expired stored the *login page* under `/` — after
+// signing in the user kept landing back on login. And cache-first navigation served the
+// previous deploy's HTML for one whole launch, so a newly shipped feature appeared to be
+// missing until the app was reopened.
 const ASSETS = [
-  '/',
-  '/index.html',
-  '/login.html',
-  '/style.css?v=12',
-  '/app.js?v=12',
+  '/style.css?v=13',
+  '/app.js?v=13',
   '/icon.jpg',
   'https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap',
   'https://unpkg.com/lucide@latest',
@@ -16,51 +18,68 @@ const ASSETS = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      // Use no-cors or ignore fail for external assets to prevent block
-      return cache.addAll(ASSETS).catch(err => {
-        console.warn('Pre-caching warning:', err);
-      });
-    })
+    caches.open(CACHE_NAME).then((cache) =>
+      // Per-asset, not addAll: one flaky CDN used to reject the whole batch, and the
+      // swallowed error left install "successful" with an empty cache — while activate
+      // had already deleted the previous one.
+      Promise.allSettled(
+        ASSETS.map((url) => cache.add(url).catch((err) => {
+          console.warn('Pre-caching skipped:', url, err && err.message);
+        }))
+      )
+    )
   );
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => {
-      return Promise.all(
-        keys.map((key) => {
-          if (key !== CACHE_NAME) {
-            return caches.delete(key);
-          }
-        })
-      );
-    })
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
+    )
   );
   self.clients.claim();
 });
 
 self.addEventListener('fetch', (event) => {
-  const url = event.request.url;
+  const request = event.request;
 
   // Let websockets and API endpoints bypass service worker cache
-  if (url.includes('/api/') || url.includes('/ssh') || event.request.method !== 'GET') {
+  if (request.url.includes('/api/') || request.url.includes('/ssh') || request.method !== 'GET') {
     return;
   }
-  
+
+  // Network-first for documents so a deploy takes effect immediately, with the cache
+  // only as an offline fallback.
+  if (request.mode === 'navigate' || request.destination === 'document') {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          // Never cache a redirect or an error page — that is how the login page ended
+          // up stored as the dashboard.
+          if (response.ok && !response.redirected) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
+
+  // Versioned static assets: cache-first with background revalidation.
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
+    caches.match(request).then((cachedResponse) => {
       if (cachedResponse) {
-        // Fetch fresh resource in background to update cache (stale-while-revalidate)
-        fetch(event.request).then((networkResponse) => {
-          if (networkResponse.status === 200) {
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, networkResponse));
+        fetch(request).then((networkResponse) => {
+          if (networkResponse.ok && !networkResponse.redirected) {
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, networkResponse));
           }
         }).catch(() => {});
         return cachedResponse;
       }
-      return fetch(event.request);
+      return fetch(request);
     })
   );
 });
