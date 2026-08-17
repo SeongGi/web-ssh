@@ -111,6 +111,12 @@ function setupEventListeners() {
   // Scanner Event Listeners
   document.getElementById('btn-ip-scan').addEventListener('click', handleIPScan);
   document.getElementById('btn-system-scan').addEventListener('click', handleSystemScan);
+
+  // Security Audit
+  document.getElementById('audit-all-btn').addEventListener('click', auditAllServers);
+  document.getElementById('audit-close-btn').addEventListener('click', closeAuditModal);
+  document.getElementById('audit-done-btn').addEventListener('click', closeAuditModal);
+  document.getElementById('audit-copy-btn').addEventListener('click', copyAuditReport);
 }
 
 // Fetch Server Profiles
@@ -230,6 +236,10 @@ function renderServerCards() {
             <span>연결하기</span>
           </button>
           <div class="card-actions">
+            <button class="btn btn-secondary btn-audit" onclick="auditServer('${server.id}')" title="보안 점검">
+              <i data-lucide="shield-check" style="width:14px;height:14px"></i>
+              <span>점검</span>
+            </button>
             <button class="btn btn-secondary btn-edit" onclick="editServer('${server.id}')">
               <i data-lucide="edit-3" style="width:14px;height:14px"></i>
               <span>수정</span>
@@ -958,4 +968,178 @@ async function diagnoseServer(serverId, event) {
       lucide.createIcons();
     }
   }
+}
+
+/* ==========================================================================
+   Security Audit
+   ========================================================================== */
+
+const SEVERITY_META = {
+  critical: { label: '치명적', className: 'sev-critical', icon: 'octagon-alert' },
+  high: { label: '높음', className: 'sev-high', icon: 'alert-triangle' },
+  medium: { label: '중간', className: 'sev-medium', icon: 'alert-circle' },
+  low: { label: '낮음', className: 'sev-low', icon: 'info' },
+  unknown: { label: '확인불가', className: 'sev-unknown', icon: 'help-circle' }
+};
+const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'unknown'];
+
+let lastAuditReports = [];
+
+function openAuditModal(title) {
+  document.getElementById('audit-modal-title').innerText = title;
+  document.getElementById('audit-modal').classList.add('active');
+}
+
+function closeAuditModal() {
+  document.getElementById('audit-modal').classList.remove('active');
+}
+
+function renderAuditPending(names) {
+  const rows = names.map(n => `
+    <div class="audit-pending-row" id="audit-pending-${escapeHtml(n.id)}">
+      <div class="spinner-sm"></div>
+      <span>${escapeHtml(n.name)} 점검 중...</span>
+    </div>`).join('');
+  document.getElementById('audit-body').innerHTML = `<div class="audit-pending">${rows}</div>`;
+}
+
+function severityCountsHtml(counts) {
+  return SEVERITY_ORDER
+    .filter(s => counts[s])
+    .map(s => `<span class="sev-pill ${SEVERITY_META[s].className}">${SEVERITY_META[s].label} ${counts[s]}</span>`)
+    .join('');
+}
+
+function renderAuditReports(reports) {
+  const body = document.getElementById('audit-body');
+
+  if (!reports.length) {
+    body.innerHTML = '<p class="audit-empty">점검할 서버가 없습니다.</p>';
+    return;
+  }
+
+  const totals = {};
+  reports.filter(r => r.success).forEach(r => {
+    SEVERITY_ORDER.forEach(s => { if (r.counts[s]) totals[s] = (totals[s] || 0) + r.counts[s]; });
+  });
+  const failedCount = reports.filter(r => !r.success).length;
+
+  const summary = `
+    <div class="audit-summary">
+      <div class="audit-summary-main">
+        <span class="audit-summary-count">${reports.length - failedCount}</span>
+        <span class="audit-summary-label">대 점검 완료${failedCount ? ` · ${failedCount}대 실패` : ''}</span>
+      </div>
+      <div class="sev-pills">${severityCountsHtml(totals) || '<span class="sev-pill sev-ok">문제 없음</span>'}</div>
+    </div>`;
+
+  const sections = reports.map(report => {
+    const name = escapeHtml(report.serverName);
+    if (!report.success) {
+      return `
+        <section class="audit-server">
+          <header class="audit-server-header">
+            <h3>${name}</h3>
+            <span class="sev-pill sev-unknown">점검 실패</span>
+          </header>
+          <p class="audit-error">${escapeHtml(report.error || '알 수 없는 오류')}</p>
+        </section>`;
+    }
+
+    const findings = report.findings.length
+      ? report.findings.map(f => {
+          const meta = SEVERITY_META[f.severity] || SEVERITY_META.unknown;
+          return `
+            <li class="audit-finding ${meta.className}">
+              <div class="audit-finding-head">
+                <i data-lucide="${meta.icon}" style="width:15px;height:15px"></i>
+                <span class="audit-finding-title">${escapeHtml(f.title)}</span>
+                <span class="audit-finding-cat">${escapeHtml(f.category)}</span>
+              </div>
+              <p class="audit-finding-detail">${escapeHtml(f.detail)}</p>
+              ${f.evidence ? `<code class="audit-evidence">${escapeHtml(f.evidence)}</code>` : ''}
+            </li>`;
+        }).join('')
+      : '<li class="audit-finding sev-ok"><div class="audit-finding-head"><i data-lucide="check-circle" style="width:15px;height:15px"></i><span class="audit-finding-title">발견된 문제 없음</span></div></li>';
+
+    return `
+      <section class="audit-server">
+        <header class="audit-server-header">
+          <h3>${name}</h3>
+          <div class="sev-pills">${severityCountsHtml(report.counts) || '<span class="sev-pill sev-ok">문제 없음</span>'}</div>
+        </header>
+        <p class="audit-server-meta">
+          ${escapeHtml(report.host || '')} · ${escapeHtml(report.kernel || '')}
+          ${report.privileged ? '' : ' · <strong>sudo 권한 없음 — 일부 항목은 설정 파일 기준</strong>'}
+        </p>
+        <ul class="audit-findings">${findings}</ul>
+      </section>`;
+  }).join('');
+
+  body.innerHTML = summary + sections;
+  lucide.createIcons();
+}
+
+async function runAudit(server) {
+  try {
+    const res = await fetch(`/api/servers/${server.id}/audit`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) return { success: false, serverName: server.name, error: data.error || `HTTP ${res.status}` };
+    return { ...data, serverName: server.name };
+  } catch (err) {
+    console.error('Audit error:', err);
+    return { success: false, serverName: server.name, error: '네트워크 오류가 발생했습니다.' };
+  }
+}
+
+async function auditServer(id) {
+  const server = servers.find(s => s.id === id);
+  if (!server) return;
+
+  openAuditModal(`보안 점검 — ${server.name}`);
+  renderAuditPending([{ id: server.id, name: server.name }]);
+
+  const report = await runAudit(server);
+  lastAuditReports = [report];
+  renderAuditReports(lastAuditReports);
+}
+
+async function auditAllServers() {
+  if (!servers.length) {
+    openAuditModal('보안 점검');
+    renderAuditReports([]);
+    return;
+  }
+
+  openAuditModal(`보안 점검 — 전체 ${servers.length}대`);
+  renderAuditPending(servers.map(s => ({ id: s.id, name: s.name })));
+
+  // Audit every server in parallel; each row resolves independently.
+  const reports = await Promise.all(servers.map(runAudit));
+  lastAuditReports = reports;
+  renderAuditReports(reports);
+}
+
+function buildAuditText() {
+  return lastAuditReports.map(r => {
+    if (!r.success) return `## ${r.serverName}\n점검 실패: ${r.error}\n`;
+    const lines = r.findings.length
+      ? r.findings.map(f => `- [${SEVERITY_META[f.severity].label}] (${f.category}) ${f.title}\n  ${f.detail}${f.evidence ? `\n  근거: ${f.evidence}` : ''}`).join('\n')
+      : '- 발견된 문제 없음';
+    return `## ${r.serverName} (${r.host})\n점검 시각: ${r.checkedAt}\n${lines}\n`;
+  }).join('\n');
+}
+
+async function copyAuditReport() {
+  const btn = document.getElementById('audit-copy-btn');
+  const label = btn.querySelector('span');
+  const original = label.innerText;
+  try {
+    await navigator.clipboard.writeText(buildAuditText());
+    label.innerText = '복사됨';
+  } catch (err) {
+    console.error('Clipboard error:', err);
+    label.innerText = '복사 실패';
+  }
+  setTimeout(() => { label.innerText = original; }, 1500);
 }
