@@ -1588,3 +1588,22 @@ select option {
     padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
   }
 }
+
+/* Disabled fields must not look editable — #current-identity shows the signed-in
+   Google account read-only, but inherited input styling made it look like a field. */
+input:disabled,
+textarea:disabled,
+select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* Inline code inside the small .field-hint text fell back to the browser default. */
+code {
+  font-family: 'Fira Code', ui-monospace, monospace;
+  font-size: 0.92em;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: var(--border-radius-sm);
+  padding: 0.08rem 0.3rem;
+}

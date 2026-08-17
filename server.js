@@ -26,13 +26,14 @@ const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(os.homedir(), '.local', 'share', 'web-ssh'));
 const KEYS_DIR = path.join(DATA_DIR, 'keys');
 const CONNECTIONS_FILE = path.join(DATA_DIR, 'connections.json');
-const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
-const PASSWORD_ITERATIONS = 210000;
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
 
-// Google OAuth 2.0 / OpenID Connect single sign-on (optional)
+// Google OAuth 2.0 / OpenID Connect — the only way in.
+// Local password login was removed deliberately: it was a second, weaker credential
+// guarding the same thing (a root shell on every managed server), it had to be stored
+// and rotated by hand, and its default-password bootstrap path caused a live exposure.
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || '';
@@ -53,21 +54,27 @@ function parseAllowList(value) {
 const GOOGLE_ALLOWED_EMAILS = new Set(parseAllowList(process.env.GOOGLE_ALLOWED_EMAILS));
 const GOOGLE_ALLOWED_DOMAINS = new Set(parseAllowList(process.env.GOOGLE_ALLOWED_DOMAINS).map(d => d.replace(/^@/, '')));
 
-// Google sign-in stays off unless an explicit allow list exists. Without one, every
-// Google account on the internet would get a shell on every managed server.
-const googleClientConfigured = Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET);
-const googleAllowListConfigured = GOOGLE_ALLOWED_EMAILS.size > 0 || GOOGLE_ALLOWED_DOMAINS.size > 0;
-const GOOGLE_LOGIN_ENABLED = googleClientConfigured && googleAllowListConfigured;
-
-if (!googleClientConfigured && (GOOGLE_CLIENT_ID || GOOGLE_CLIENT_SECRET)) {
-  console.warn('Google login disabled: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must both be set.');
-} else if (googleClientConfigured && !googleAllowListConfigured) {
-  console.warn('Google login disabled: set GOOGLE_ALLOWED_EMAILS or GOOGLE_ALLOWED_DOMAINS to name the accounts that may sign in.');
-} else if (GOOGLE_LOGIN_ENABLED) {
-  console.log('Google login enabled.');
+// Google sign-in requires an explicit allow list. Without one, every Google account on
+// the internet would get a shell on every managed server.
+//
+// Because this is now the ONLY way in, an incomplete configuration is fatal rather than
+// a warning: a portal that is up but has no usable login is worse than one that refuses
+// to start, since the latter tells you immediately and cannot be mistaken for healthy.
+const googleConfigErrors = [];
+if (!GOOGLE_CLIENT_ID) googleConfigErrors.push('GOOGLE_CLIENT_ID is not set');
+if (!GOOGLE_CLIENT_SECRET) googleConfigErrors.push('GOOGLE_CLIENT_SECRET is not set');
+if (!GOOGLE_ALLOWED_EMAILS.size && !GOOGLE_ALLOWED_DOMAINS.size) {
+  googleConfigErrors.push('neither GOOGLE_ALLOWED_EMAILS nor GOOGLE_ALLOWED_DOMAINS is set');
 }
+if (googleConfigErrors.length) {
+  throw new Error(
+    'Google login is the only authentication method and it is not fully configured:\n' +
+    googleConfigErrors.map(e => `  - ${e}`).join('\n') +
+    '\nSet these in the environment (see .env.example) and restart.'
+  );
+}
+console.log(`Google login enabled. Allowed: ${[...GOOGLE_ALLOWED_EMAILS, ...[...GOOGLE_ALLOWED_DOMAINS].map(d => `*@${d}`)].join(', ')}`);
 
-let authConfig = { username: 'admin', salt: '', hash: '' };
 let appConfig = { portalName: 'Web-SSH Portal' };
 
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
@@ -91,65 +98,20 @@ if (!fs.existsSync(CONFIG_FILE)) {
   }
 }
 
-function hashPassword(password, salt, iterations = PASSWORD_ITERATIONS) {
-  return crypto.pbkdf2Sync(password, salt, iterations, 64, 'sha512').toString('hex');
-}
-
-function safeEqualHex(left, right) {
+// A leftover auth.json from a password-login release only holds a credential that is no
+// longer honoured. Remove it so a stale hash cannot sit around in the data volume.
+const legacyAuthFile = path.join(DATA_DIR, 'auth.json');
+if (fs.existsSync(legacyAuthFile)) {
   try {
-    const leftBuffer = Buffer.from(left, 'hex');
-    const rightBuffer = Buffer.from(right, 'hex');
-    return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
-  } catch {
-    return false;
-  }
-}
-
-// Initialize auth configuration from an operator-supplied secret.
-if (!fs.existsSync(AUTH_FILE)) {
-  const initialPassword = process.env.ADMIN_PASSWORD;
-  if (!initialPassword || initialPassword.length < 12) {
-    throw new Error('First start requires ADMIN_PASSWORD with at least 12 characters.');
-  }
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = hashPassword(initialPassword, salt);
-  authConfig = { username: process.env.ADMIN_USERNAME || 'admin', salt, hash, iterations: PASSWORD_ITERATIONS };
-  writeJsonSecure(AUTH_FILE, authConfig);
-  console.log('Administrator credentials initialized from environment.');
-} else {
-  try {
-    authConfig = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf-8'));
+    fs.unlinkSync(legacyAuthFile);
+    console.log('Removed obsolete auth.json — password login no longer exists.');
   } catch (e) {
-    throw new Error(`Cannot read authentication configuration: ${e.message}`);
-  }
-  if (!authConfig.username || !authConfig.salt || !authConfig.hash) {
-    throw new Error('Authentication configuration is incomplete; restore it or remove it and set ADMIN_PASSWORD.');
-  }
-  const storedIterations = authConfig.iterations || 10000;
-  const isLegacyDefault = safeEqualHex(
-    hashPassword('adminpassword', authConfig.salt, storedIterations),
-    authConfig.hash
-  );
-  if (isLegacyDefault) {
-    const replacement = process.env.ADMIN_PASSWORD;
-    if (!replacement || replacement.length < 12 || replacement === 'adminpassword') {
-      throw new Error('Insecure legacy default password detected. Set a new ADMIN_PASSWORD (12+ characters) to rotate it.');
-    }
-    const salt = crypto.randomBytes(16).toString('hex');
-    authConfig = {
-      username: process.env.ADMIN_USERNAME || authConfig.username,
-      salt,
-      hash: hashPassword(replacement, salt),
-      iterations: PASSWORD_ITERATIONS
-    };
-    writeJsonSecure(AUTH_FILE, authConfig);
-    console.log('Insecure legacy administrator password was rotated.');
+    console.warn(`Could not remove obsolete auth.json: ${e.message}`);
   }
 }
 
 // In-memory active session tokens: token -> { expiresAt, user }
 const activeSessions = new Map();
-const loginAttempts = new Map();
 
 // Native Cookie Parser Helper
 function getCookie(req, name) {
@@ -192,7 +154,7 @@ function requireAuth(req, res, next) {
 
   // Publicly accessible paths
   const publicRoutes = ['/login.html', '/style.css', '/icon.jpg', '/manifest.json', '/sw.js', '/api/config'];
-  if (publicRoutes.includes(path) || path.startsWith('/api/login') || path.startsWith('/api/auth/google')) {
+  if (publicRoutes.includes(path) || path.startsWith('/api/auth/google')) {
     return next();
   }
 
@@ -1239,53 +1201,14 @@ app.post('/api/servers/:id/audit', (req, res) => {
 });
 
 // Auth API Endpoints
-
-// Login Route
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
-  const attemptKey = req.socket.remoteAddress || 'unknown';
-  const attempt = loginAttempts.get(attemptKey) || { count: 0, resetAt: Date.now() + 15 * 60 * 1000 };
-  if (attempt.resetAt <= Date.now()) {
-    attempt.count = 0;
-    attempt.resetAt = Date.now() + 15 * 60 * 1000;
-  }
-  if (attempt.count >= 10) {
-    res.setHeader('Retry-After', Math.ceil((attempt.resetAt - Date.now()) / 1000));
-    return res.status(429).json({ error: 'Too many login attempts. Try again later.' });
-  }
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required.' });
-  }
-
-  const iterations = authConfig.iterations || 10000;
-  const hash = hashPassword(password, authConfig.salt, iterations);
-  if (username !== authConfig.username || !safeEqualHex(hash, authConfig.hash)) {
-    attempt.count += 1;
-    loginAttempts.set(attemptKey, attempt);
-    return res.status(401).json({ error: 'Invalid username or password.' });
-  }
-  loginAttempts.delete(attemptKey);
-
-  // Upgrade hashes created by older releases after a successful login.
-  if (iterations < PASSWORD_ITERATIONS) {
-    const salt = crypto.randomBytes(16).toString('hex');
-    authConfig = { ...authConfig, salt, hash: hashPassword(password, salt), iterations: PASSWORD_ITERATIONS };
-    writeJsonSecure(AUTH_FILE, authConfig);
-  }
-
-  // Generate secure random session token and set the HTTP-Only cookie
-  const token = createSession({ provider: 'local', name: authConfig.username });
-  res.setHeader('Set-Cookie', sessionCookie(token));
-  res.json({ success: true });
-});
+//
+// There is no /api/login. Password authentication was removed: Google is the sole
+// identity provider, so account lockout, brute-force throttling, password rotation and
+// MFA are Google's problem rather than a hand-rolled PBKDF2 path in this file.
 
 // Google Login: start the authorization code flow
 app.get('/api/auth/google', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  if (!GOOGLE_LOGIN_ENABLED) {
-    return res.redirect('/login.html?error=google_disabled');
-  }
-
   prunePendingOAuthStates();
   const state = base64UrlEncode(crypto.randomBytes(32));
   const nonce = base64UrlEncode(crypto.randomBytes(32));
@@ -1318,7 +1241,6 @@ app.get('/api/auth/google/callback', async (req, res) => {
     res.redirect(`/login.html?error=${code}`);
   };
 
-  if (!GOOGLE_LOGIN_ENABLED) return fail('google_disabled');
   if (req.query.error) return fail('google_denied');
 
   prunePendingOAuthStates();
@@ -1391,63 +1313,38 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
-// Get Profile Details
+// Get Profile Details — identity comes from the Google session, not from stored config.
 app.get('/api/profile', (req, res) => {
   const session = getSession(getCookie(req, 'session_token'));
-  const user = (session && session.user) || { provider: 'local' };
+  const user = (session && session.user) || {};
   res.json({
-    username: authConfig.username,
-    provider: user.provider || 'local',
+    provider: 'google',
     email: user.email || null,
-    displayName: user.name || authConfig.username
+    displayName: user.name || user.email || ''
   });
 });
 
 // Get Portal Configuration
 app.get('/api/config', (req, res) => {
-  res.json({ portalName: appConfig.portalName, googleLoginEnabled: GOOGLE_LOGIN_ENABLED });
+  res.json({ portalName: appConfig.portalName });
 });
 
-// Update Profile & Portal Configuration (Username, Password, Portal Name)
+// Update Portal Configuration.
+// Only the portal name is editable now — there is no local credential to change, and
+// the allow list is deliberately environment-only so the portal cannot widen its own
+// access from inside the UI (a session hijack would otherwise be able to add accounts).
 app.post('/api/update-profile', (req, res) => {
-  const { currentPassword, newUsername, newPassword, portalName } = req.body;
-  if (!currentPassword || !newUsername) {
-    return res.status(400).json({ error: 'Current password and username are required.' });
+  const { portalName } = req.body;
+  if (typeof portalName !== 'string' || !portalName.trim()) {
+    return res.status(400).json({ error: '포털 이름을 입력하세요.' });
+  }
+  if (portalName.trim().length > 60) {
+    return res.status(400).json({ error: '포털 이름은 60자 이내여야 합니다.' });
   }
 
-  const currentHash = hashPassword(currentPassword, authConfig.salt, authConfig.iterations || 10000);
-  if (!safeEqualHex(currentHash, authConfig.hash)) {
-    return res.status(400).json({ error: 'Current password does not match.' });
-  }
-
-  // Validate everything before touching live state. The username used to be assigned
-  // before the password-length check, so rejecting a short password left the in-memory
-  // username changed but nothing persisted — login then needed the new username with
-  // the old password, and a restart silently reverted it.
-  if (newPassword && newPassword.length < 12) {
-    return res.status(400).json({ error: 'New password must be at least 12 characters.' });
-  }
-
-  const next = { ...authConfig, username: newUsername };
-  if (newPassword) {
-    const newSalt = crypto.randomBytes(16).toString('hex');
-    next.salt = newSalt;
-    next.hash = hashPassword(newPassword, newSalt);
-    next.iterations = PASSWORD_ITERATIONS;
-  }
-
-  writeJsonSecure(AUTH_FILE, next);
-  authConfig = next;
-
-  // Update Portal Name if provided
-  if (portalName) {
-    appConfig.portalName = portalName;
-    writeJsonSecure(CONFIG_FILE, appConfig);
-  }
-
-  activeSessions.clear();
-
-  res.json({ success: true });
+  appConfig.portalName = portalName.trim();
+  writeJsonSecure(CONFIG_FILE, appConfig);
+  res.json({ success: true, portalName: appConfig.portalName });
 });
 
 // Setup server and WebSocket
