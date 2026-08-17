@@ -1,4 +1,4 @@
-const CACHE_NAME = 'web-ssh-v9';
+const CACHE_NAME = 'web-ssh-v10';
 
 // HTML is deliberately NOT precached. `/` and `/index.html` sit behind requireAuth, so
 // precaching them while the session is expired stored the *login page* under `/` — after
@@ -6,14 +6,16 @@ const CACHE_NAME = 'web-ssh-v9';
 // previous deploy's HTML for one whole launch, so a newly shipped feature appeared to be
 // missing until the app was reopened.
 const ASSETS = [
-  '/style.css?v=14',
-  '/app.js?v=14',
+  '/style.css?v=15',
+  '/app.js?v=15',
   '/icon.jpg',
-  'https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap',
-  'https://unpkg.com/lucide@latest',
-  'https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css',
-  'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js',
-  'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js'
+  // Vendored locally: these used to be fetched from unpkg/jsdelivr and then cached
+  // here, so one bad CDN response persisted across reloads and deploys.
+  '/vendor/lucide.min.js',
+  '/vendor/xterm.js',
+  '/vendor/xterm.css',
+  '/vendor/xterm-addon-fit.js',
+  'https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap'
 ];
 
 self.addEventListener('install', (event) => {

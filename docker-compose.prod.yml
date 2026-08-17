@@ -6,13 +6,14 @@ services:
       - "3000:3000"
     environment:
       DATA_DIR: /app/data
-      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
       # Google login is the only authentication method.
       # _CLIENT_ID and _CLIENT_SECRET are required; at least one of
       # _ALLOWED_EMAILS / _ALLOWED_DOMAINS is required; _REDIRECT_URI is optional.
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?Set GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?Set GOOGLE_CLIENT_SECRET}
-      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:?Set GOOGLE_REDIRECT_URI}
+      HSTS_MAX_AGE: ${HSTS_MAX_AGE:-300}
       GOOGLE_ALLOWED_EMAILS: ${GOOGLE_ALLOWED_EMAILS:-}
       GOOGLE_ALLOWED_DOMAINS: ${GOOGLE_ALLOWED_DOMAINS:-}
     volumes:

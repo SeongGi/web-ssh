@@ -156,7 +156,9 @@ docker compose up -d
 | `GOOGLE_CLIENT_ID` | ✅ | OAuth 클라이언트 ID |
 | `GOOGLE_CLIENT_SECRET` | ✅ | OAuth 클라이언트 보안 비밀번호 |
 | `GOOGLE_ALLOWED_EMAILS` / `GOOGLE_ALLOWED_DOMAINS` | ✅ (둘 중 하나 이상) | 로그인을 허용할 이메일 또는 이메일 도메인 (쉼표 구분) |
-| `GOOGLE_REDIRECT_URI` | ⬜ | 생략하면 요청 호스트에서 유추합니다. 리버스 프록시 뒤에서는 명시하세요. |
+| `GOOGLE_REDIRECT_URI` | ✅ | `https://<포털주소>/api/auth/google/callback`. 유추하지 않고 반드시 명시해야 합니다 — 예전 폴백은 클라이언트가 보낼 수 있는 `X-Forwarded-*` / `Host` 헤더로 이 값을 만들었고, 그 값이 Google 토큰 엔드포인트로 다시 전송됐습니다. |
+| `COOKIE_SECURE` | ⬜ | 기본 `true`. 평문 http 로컬 개발에서만 `false`. |
+| `HSTS_MAX_AGE` | ⬜ | 기본 `300`(초). 동작 확인 후 `31536000`으로 올리세요. |
 
 `.env.example`을 `.env`로 복사해서 채워도 됩니다.
 
@@ -171,6 +173,14 @@ docker compose up -d
 - 이메일이 Google에서 인증된(`email_verified`) 계정만 통과합니다.
 - CSRF 방지를 위한 `state`, 재생 공격 방지를 위한 `nonce`, 그리고 PKCE(S256)를 함께 사용합니다.
 - 저장되는 비밀번호가 없습니다. 계정 잠금·무차별 대입 차단·MFA는 Google이 담당합니다.
+  **즉 허용된 Google 계정의 복구 절차가 곧 이 포털의 인증 경계입니다** — 해당 계정에
+  하드웨어 키 2단계 인증(고급 보호 프로그램)을 적용하세요.
+- 진행 중인 로그인 요청은 서버 메모리가 아니라 서명된 쿠키에 담깁니다. 예전 방식은 공유
+  맵이라, 미인증 요청 수백 건으로 정상 사용자의 로그인 요청을 밀어내 아무도 로그인할 수
+  없게 만들 수 있었습니다.
+- 서드파티 스크립트(`lucide`, `xterm`)는 `public/vendor/`에 포함해 같은 오리진에서 제공합니다.
+  CDN의 변경 가능한 태그(`@latest`)를 신뢰하면 그쪽이 뚫릴 때 포털 오리진에서 JS가 실행되고,
+  그건 곧 관리 서버 전체의 셸입니다.
 - 운영 환경에서는 반드시 HTTPS와 `COOKIE_SECURE=true`를 함께 사용하세요.
 
 ### 로그인이 안 될 때 (복구)

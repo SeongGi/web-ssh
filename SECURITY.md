@@ -94,10 +94,43 @@ access, so:
 - A leftover `auth.json` from a password-login release is deleted at startup so a
   no-longer-honoured hash does not linger in the data volume.
 
+## Third-party code in the portal origin
+
+`lucide` and `xterm` are vendored under `public/vendor/` and served from this origin.
+They used to load from `unpkg.com/lucide@latest` and `cdn.jsdelivr.net`. A mutable tag on
+a third-party host is a code-execution path into the origin that holds a browser terminal
+to every managed server: `HttpOnly` does not help, because injected script uses the
+session in place — read `/api/servers`, open `/ssh`, and it is typing as root. The
+service worker also cached whatever the CDN returned, so one bad response persisted
+across reloads. CSP no longer allows any external script origin.
+
+Google Fonts is still remote. A hostile stylesheet cannot execute script, so that
+exposure is not comparable; vendoring the fonts is a reasonable further step, not a fix
+for the same class of problem.
+
+`'unsafe-inline'` remains in `script-src` because the dashboard generates inline
+`onclick` handlers. Removing it requires converting those to `addEventListener` first.
+
+## Framing and transport
+
+The reverse proxy rewrites `X-Frame-Options` from the app's `DENY` to `SAMEORIGIN`, so
+framing is enforced through CSP `frame-ancestors 'none'`, which an intermediary header
+rewrite does not affect. `Strict-Transport-Security` is sent by the app rather than the
+proxy so `max-age` can be ramped — NPMplus' toggle is hardcoded to two years, which is a
+large commitment to make in one step. Start at `HSTS_MAX_AGE=300`, confirm, then raise.
+Do not enable `includeSubDomains` or preload for `seonggi.kr` unless every subdomain is
+HTTPS-only.
+
 ## Deployment requirements
 
-- Configure Google login fully before first start; the server refuses to boot without
-  a client ID, a client secret, and an allow list. There is no local password to set.
+- Configure Google login fully before first start; the server refuses to boot without a
+  client ID, a client secret, an allow list, and an explicit `GOOGLE_REDIRECT_URI`. Allow
+  list entries are shape-checked, so a value like `@` is rejected rather than producing a
+  portal that starts but cannot be logged into. There is no local password to set.
+- Domain allow-listing additionally requires the ID token's `hd` claim to match, so only
+  real Workspace members of that domain pass — receiving mail at an address is not enough.
+- Publishing port 3000 on all interfaces is only appropriate when the reverse proxy runs
+  on a different host. When the proxy is local, publish on `127.0.0.1` instead.
 - Keep `/app/data` in a protected volume; files are created with owner-only access.
 - Never commit `data/`, `.env`, SSH exports, archives, private keys, or backups.
 - Put the service behind an authenticated HTTPS reverse proxy or private VPN; do not

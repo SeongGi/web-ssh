@@ -1,0 +1,3 @@
+  lucide 버전: 1.31.0
+  xterm: 5.3.0
+  xterm-addon-fit: 0.8.0

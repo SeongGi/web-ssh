@@ -28,7 +28,10 @@ const KEYS_DIR = path.join(DATA_DIR, 'keys');
 const CONNECTIONS_FILE = path.join(DATA_DIR, 'connections.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
-const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true';
+// Default ON: an opt-in flag meant a deployment that forgot it silently issued
+// non-Secure session cookies over HTTPS. Set COOKIE_SECURE=false only for plain-http
+// local development.
+const COOKIE_SECURE = process.env.COOKIE_SECURE !== 'false';
 
 // Google OAuth 2.0 / OpenID Connect — the only way in.
 // Local password login was removed deliberately: it was a second, weaker credential
@@ -65,6 +68,36 @@ if (!GOOGLE_CLIENT_ID) googleConfigErrors.push('GOOGLE_CLIENT_ID is not set');
 if (!GOOGLE_CLIENT_SECRET) googleConfigErrors.push('GOOGLE_CLIENT_SECRET is not set');
 if (!GOOGLE_ALLOWED_EMAILS.size && !GOOGLE_ALLOWED_DOMAINS.size) {
   googleConfigErrors.push('neither GOOGLE_ALLOWED_EMAILS nor GOOGLE_ALLOWED_DOMAINS is set');
+}
+// Required, not inferred: the old fallback built the redirect URI from client-controlled
+// X-Forwarded-* / Host headers and replayed that value to Google's token endpoint.
+if (!GOOGLE_REDIRECT_URI) {
+  googleConfigErrors.push('GOOGLE_REDIRECT_URI is not set (e.g. https://portal.example.com/api/auth/google/callback)');
+} else {
+  try {
+    const parsed = new URL(GOOGLE_REDIRECT_URI);
+    if (parsed.pathname !== '/api/auth/google/callback') {
+      googleConfigErrors.push(`GOOGLE_REDIRECT_URI must end in /api/auth/google/callback (got ${parsed.pathname})`);
+    }
+    if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
+      googleConfigErrors.push('GOOGLE_REDIRECT_URI must use https except for localhost');
+    }
+  } catch {
+    googleConfigErrors.push('GOOGLE_REDIRECT_URI is not a valid absolute URL');
+  }
+}
+// Shape-check each allow-list entry. Presence alone was not enough: a value like "@"
+// passes a non-empty test, matches no real Google account, and the server would then
+// come up looking healthy while nobody could log in.
+for (const email of GOOGLE_ALLOWED_EMAILS) {
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    googleConfigErrors.push(`GOOGLE_ALLOWED_EMAILS entry is not an email address: ${email}`);
+  }
+}
+for (const domain of GOOGLE_ALLOWED_DOMAINS) {
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/.test(domain)) {
+    googleConfigErrors.push(`GOOGLE_ALLOWED_DOMAINS entry is not a domain: ${domain}`);
+  }
 }
 if (googleConfigErrors.length) {
   throw new Error(
@@ -143,18 +176,79 @@ function createSession(user) {
   return token;
 }
 
+// Live terminal sockets per session, so logout and expiry can actually close them.
+const sessionSockets = new Map();
+
+function trackSessionSocket(token, ws) {
+  if (!sessionSockets.has(token)) sessionSockets.set(token, new Set());
+  sessionSockets.get(token).add(ws);
+}
+
+function untrackSessionSocket(token, ws) {
+  const set = sessionSockets.get(token);
+  if (!set) return;
+  set.delete(ws);
+  if (!set.size) sessionSockets.delete(token);
+}
+
+function closeSessionSockets(token, reason) {
+  const set = sessionSockets.get(token);
+  if (!set) return;
+  for (const ws of set) {
+    try {
+      ws.send(JSON.stringify({ type: 'error', message: reason }));
+    } catch { /* already closing */ }
+    try {
+      ws.close(1008, 'Session ended');
+    } catch { /* already closed */ }
+  }
+  sessionSockets.delete(token);
+}
+
 function sessionCookie(token) {
   const secure = COOKIE_SECURE ? '; Secure' : '';
   return `session_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${secure}`;
 }
 
+// Publicly accessible paths — exact matches only.
+//
+// This used to allow anything matching `startsWith('/api/auth/google')`, which was an
+// authentication bypass for the whole static mount: `req.path` is the raw pathname, so
+// the prefix test passed for `/api/auth/google/../../../index.html`, and serve-static
+// then normalised the traversal away and served the file. Vendored assets are listed by
+// prefix because they are static files that must load before login.
+const PUBLIC_PATHS = new Set([
+  '/login.html',
+  '/style.css',
+  '/icon.jpg',
+  '/manifest.json',
+  '/sw.js',
+  '/api/config',
+  '/api/auth/google',
+  '/api/auth/google/callback'
+]);
+
+function isPublicPath(pathname) {
+  if (PUBLIC_PATHS.has(pathname)) return true;
+  // Third-party assets are vendored under /vendor/ and needed by the login page.
+  return /^\/vendor\/[A-Za-z0-9._-]+$/.test(pathname);
+}
+
 // Authentication Middleware
 function requireAuth(req, res, next) {
-  const path = req.path;
+  // Decode and normalise before deciding, so percent-encoded traversal cannot slip
+  // past the comparison the way it slipped past the old prefix test.
+  let pathname = req.path;
+  try {
+    pathname = decodeURIComponent(pathname);
+  } catch {
+    return res.status(400).json({ error: 'Bad request' });
+  }
+  if (pathname.includes('..') || pathname.includes('\\') || pathname.includes('\0')) {
+    return res.status(400).json({ error: 'Bad request' });
+  }
 
-  // Publicly accessible paths
-  const publicRoutes = ['/login.html', '/style.css', '/icon.jpg', '/manifest.json', '/sw.js', '/api/config'];
-  if (publicRoutes.includes(path) || path.startsWith('/api/auth/google')) {
+  if (isPublicPath(pathname)) {
     return next();
   }
 
@@ -164,7 +258,7 @@ function requireAuth(req, res, next) {
   }
 
   // Handle unauthorized requests
-  if (path === '/' || path === '/index.html') {
+  if (pathname === '/' || pathname === '/index.html') {
     return res.redirect('/login.html');
   } else {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -173,8 +267,6 @@ function requireAuth(req, res, next) {
 
 // Google OAuth helpers
 
-// Pending authorization requests: state -> { nonce, codeVerifier, redirectUri, expiresAt }
-const pendingOAuthStates = new Map();
 let googleJwksCache = { keys: [], expiresAt: 0 };
 
 function base64UrlEncode(buffer) {
@@ -185,37 +277,52 @@ function base64UrlDecode(value) {
   return Buffer.from(String(value).replace(/-/g, '+').replace(/_/g, '/'), 'base64');
 }
 
-// /api/auth/google is unauthenticated, so the pending-state map is reachable by
-// anyone. Expiry alone is not a bound: cap the size and evict oldest-first so the map
-// cannot be grown without limit inside a single TTL window.
-const MAX_PENDING_OAUTH_STATES = 500;
+// The in-flight authorization request lives entirely in a signed cookie on the client
+// rather than in a shared server-side map.
+//
+// The map version was a denial of service on the only remaining way to log in: it was
+// reachable unauthenticated via /api/auth/google, and once it hit its cap it evicted
+// oldest-first, so ~500 anonymous requests displaced every legitimate pending login and
+// a slow trickle kept nobody able to sign in. Per-client state cannot be evicted by
+// another client. The key is process-local and random, so a restart simply invalidates
+// in-flight logins (the user clicks the button again) and nothing is persisted.
+const OAUTH_STATE_KEY = crypto.randomBytes(32);
 
-function prunePendingOAuthStates() {
-  const now = Date.now();
-  for (const [state, entry] of pendingOAuthStates) {
-    if (entry.expiresAt <= now) pendingOAuthStates.delete(state);
-  }
-  while (pendingOAuthStates.size >= MAX_PENDING_OAUTH_STATES) {
-    // Map iteration is insertion-ordered, so the first key is the oldest.
-    pendingOAuthStates.delete(pendingOAuthStates.keys().next().value);
+function signOAuthState(payload) {
+  const body = base64UrlEncode(Buffer.from(JSON.stringify(payload), 'utf-8'));
+  const mac = base64UrlEncode(crypto.createHmac('sha256', OAUTH_STATE_KEY).update(body).digest());
+  return `${body}.${mac}`;
+}
+
+function verifyOAuthState(value) {
+  const parts = String(value || '').split('.');
+  if (parts.length !== 2) return null;
+  const [body, mac] = parts;
+  const expected = crypto.createHmac('sha256', OAUTH_STATE_KEY).update(body).digest();
+  const provided = base64UrlDecode(mac);
+  if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) return null;
+  try {
+    const payload = JSON.parse(base64UrlDecode(body).toString('utf-8'));
+    if (typeof payload.exp !== 'number' || payload.exp <= Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
   }
 }
 
-function oauthStateCookie(state) {
+function oauthStateCookie(value) {
   const secure = COOKIE_SECURE ? '; Secure' : '';
-  const maxAge = state ? OAUTH_STATE_TTL_MS / 1000 : 0;
+  const maxAge = value ? OAUTH_STATE_TTL_MS / 1000 : 0;
   // SameSite=Lax so the cookie survives the top-level redirect back from Google.
-  return `oauth_state=${state || ''}; Path=${OAUTH_COOKIE_PATH}; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`;
+  return `oauth_state=${value || ''}; Path=${OAUTH_COOKIE_PATH}; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`;
 }
 
 // The redirect URI must match the one registered in the Google Cloud console.
-function resolveGoogleRedirectUri(req) {
-  if (GOOGLE_REDIRECT_URI) return GOOGLE_REDIRECT_URI;
-  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
-  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
-  const proto = forwardedProto || (COOKIE_SECURE ? 'https' : 'http');
-  const host = forwardedHost || req.headers.host || `localhost:${PORT}`;
-  return `${proto}://${host}${OAUTH_COOKIE_PATH}/callback`;
+// It is required rather than inferred: the old fallback built it from client-controlled
+// X-Forwarded-Proto / X-Forwarded-Host / Host, and that value is replayed to Google's
+// token endpoint. Requiring it removes a header-trust dependency from the login path.
+function resolveGoogleRedirectUri() {
+  return GOOGLE_REDIRECT_URI;
 }
 
 async function fetchGoogleJwks(forceRefresh = false) {
@@ -275,8 +382,18 @@ function isGoogleAccountAllowed(payload) {
   if (payload.email_verified !== true && payload.email_verified !== 'true') return false;
   const email = String(payload.email || '').toLowerCase();
   if (!email.includes('@')) return false;
+
+  // An explicitly listed address is matched exactly.
   if (GOOGLE_ALLOWED_EMAILS.has(email)) return true;
-  return GOOGLE_ALLOWED_DOMAINS.has(email.slice(email.lastIndexOf('@') + 1));
+
+  // Domain matches additionally require the `hd` (hosted domain) claim, which only
+  // Workspace accounts carry. Matching on the email suffix alone would accept a
+  // consumer Google account created on any address at that domain whose mailbox the
+  // holder can read — a catch-all alias, a mailing list, a lapsed account — none of
+  // which implies membership of the organisation.
+  const domain = email.slice(email.lastIndexOf('@') + 1);
+  if (!GOOGLE_ALLOWED_DOMAINS.has(domain)) return false;
+  return String(payload.hd || '').toLowerCase() === domain;
 }
 
 // Auto-run import only when an external import directory was explicitly configured.
@@ -445,6 +562,34 @@ function parseDiagnosticOutput(stdout) {
   }
 }
 
+// HSTS max-age. Sent by the app rather than the reverse proxy so the value can be
+// ramped: NPMplus' HSTS toggle is hardcoded to two years, which is a long commitment to
+// make in one step. Start short, then raise once it has been observed working.
+const HSTS_MAX_AGE = process.env.HSTS_MAX_AGE || '300';
+
+// Scripts are served from this origin only. They used to come from
+// unpkg.com/lucide@latest and cdn.jsdelivr.net — a mutable tag on a third-party host,
+// executing in the origin that holds root shells for the whole fleet, and the service
+// worker cached whatever it returned. They are vendored under /vendor/ now.
+// Fonts remain remote: a hostile stylesheet cannot execute script, so the exposure is
+// not comparable.
+// 'unsafe-inline' is still required by the inline onclick handlers the dashboard
+// generates; removing it means converting those to addEventListener first.
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com",
+  "connect-src 'self' ws: wss:",
+  "img-src 'self' data:",
+  // The reverse proxy rewrites X-Frame-Options to SAMEORIGIN, so rely on CSP for
+  // framing: frame-ancestors is not something an intermediary header rewrite affects.
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "object-src 'none'"
+].join('; ');
+
 const app = express();
 app.disable('x-powered-by');
 app.use((req, res, next) => {
@@ -452,7 +597,12 @@ app.use((req, res, next) => {
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; img-src 'self' data:");
+  res.setHeader('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+  // Only over HTTPS — an HSTS header on plain http://localhost would pin the dev host.
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  if (req.secure || forwardedProto === 'https' || COOKIE_SECURE) {
+    res.setHeader('Strict-Transport-Security', `max-age=${HSTS_MAX_AGE}`);
+  }
   next();
 });
 app.use(express.json({ limit: '64kb' }));
@@ -535,11 +685,28 @@ app.put('/api/servers/:id', (req, res) => {
   }
 
   const existing = connections[connIndex];
-  
+
+  // Repointing a saved profile at a different host must not carry the stored credential
+  // along. Otherwise a session could set host=attacker.tld and then trigger any connect
+  // (ping/diagnose/audit/ssh), handing the stored SSH password to an sshd it controls —
+  // turning a temporary session into permanent theft of a credential that is probably
+  // reused elsewhere. There is no host-key pinning to notice the swap.
+  const nextHost = host || existing.host;
+  const nextPort = parseInt(port, 10) || existing.port;
+  const nextUsername = username || existing.username;
+  const targetChanged =
+    nextHost !== existing.host || nextPort !== existing.port || nextUsername !== existing.username;
+
+  if (targetChanged && existing.authType === 'password' && existing.password && !password) {
+    return res.status(400).json({
+      error: '접속 대상(호스트/포트/계정)을 변경할 때는 비밀번호를 다시 입력해야 합니다. 저장된 비밀번호가 새 대상으로 전송되지 않도록 하기 위한 제한입니다.'
+    });
+  }
+
   existing.name = name || existing.name;
-  existing.host = host || existing.host;
-  existing.port = parseInt(port, 10) || existing.port;
-  existing.username = username || existing.username;
+  existing.host = nextHost;
+  existing.port = nextPort;
+  existing.username = nextUsername;
   existing.authType = authType || existing.authType;
   existing.os = os !== undefined ? os : existing.os;
   existing.spec = spec !== undefined ? spec : existing.spec;
@@ -652,9 +819,12 @@ app.get('/api/servers/:id/ping', (req, res) => {
 app.get('/api/scan-ip', (req, res) => {
   const { host, port } = req.query;
   const targetPort = parseInt(port, 10) || 22;
-  
+
   if (!host) {
     return res.status(400).json({ error: 'Host is required' });
+  }
+  if (isBlockedScanTarget(host)) {
+    return res.status(400).json({ error: '이 주소는 스캔할 수 없습니다.' });
   }
 
   const socket = new net.Socket();
@@ -1148,6 +1318,17 @@ function parseSecurityAudit(stdout) {
   };
 }
 
+// Link-local is blocked because 169.254.169.254 is the cloud instance-metadata address:
+// on a cloud deployment the portal's own credentials would be reachable through it.
+// RFC1918 is deliberately NOT blocked — managed servers legitimately live on the LAN.
+function isBlockedScanTarget(host) {
+  const target = String(host).trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (/^169\.254\./.test(target)) return true;
+  if (/^fe80:/.test(target)) return true;
+  if (target === 'metadata.google.internal') return true;
+  return false;
+}
+
 // Build an ssh2 config from a stored connection profile.
 function buildSshConfig(conn) {
   const sshConfig = { host: conn.host, port: conn.port || 22, username: conn.username, readyTimeout: 15000 };
@@ -1209,15 +1390,19 @@ app.post('/api/servers/:id/audit', (req, res) => {
 // Google Login: start the authorization code flow
 app.get('/api/auth/google', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  prunePendingOAuthStates();
   const state = base64UrlEncode(crypto.randomBytes(32));
   const nonce = base64UrlEncode(crypto.randomBytes(32));
   const codeVerifier = base64UrlEncode(crypto.randomBytes(32));
   const codeChallenge = base64UrlEncode(crypto.createHash('sha256').update(codeVerifier).digest());
-  const redirectUri = resolveGoogleRedirectUri(req);
+  const redirectUri = resolveGoogleRedirectUri();
 
-  pendingOAuthStates.set(state, { nonce, codeVerifier, redirectUri, expiresAt: Date.now() + OAUTH_STATE_TTL_MS });
-  res.setHeader('Set-Cookie', oauthStateCookie(state));
+  // nonce and code_verifier travel with the client in a signed cookie, bound to state.
+  res.setHeader('Set-Cookie', oauthStateCookie(signOAuthState({
+    state,
+    nonce,
+    codeVerifier,
+    exp: Date.now() + OAUTH_STATE_TTL_MS
+  })));
 
   const authorizeUrl = new URL(GOOGLE_AUTH_ENDPOINT);
   authorizeUrl.searchParams.set('client_id', GOOGLE_CLIENT_ID);
@@ -1243,15 +1428,19 @@ app.get('/api/auth/google/callback', async (req, res) => {
 
   if (req.query.error) return fail('google_denied');
 
-  prunePendingOAuthStates();
   const code = typeof req.query.code === 'string' ? req.query.code : '';
   const state = typeof req.query.state === 'string' ? req.query.state : '';
-  const cookieState = getCookie(req, 'oauth_state');
-  if (!code || !state || !cookieState || state !== cookieState) return fail('google_state');
+  const pending = verifyOAuthState(getCookie(req, 'oauth_state'));
+  if (!code || !state || !pending) return fail('google_state');
 
-  const pending = pendingOAuthStates.get(state);
-  pendingOAuthStates.delete(state);
-  if (!pending) return fail('google_state');
+  // The state in the URL must match the one sealed in the cookie (CSRF), and the
+  // cookie is cleared on every exit path below so a code cannot be replayed.
+  const stateBuf = Buffer.from(state);
+  const sealedBuf = Buffer.from(pending.state);
+  if (stateBuf.length !== sealedBuf.length || !crypto.timingSafeEqual(stateBuf, sealedBuf)) {
+    return fail('google_state');
+  }
+  pending.redirectUri = resolveGoogleRedirectUri();
 
   try {
     const tokenResponse = await fetch(GOOGLE_TOKEN_ENDPOINT, {
@@ -1307,6 +1496,8 @@ app.post('/api/logout', (req, res) => {
   const token = getCookie(req, 'session_token');
   if (token) {
     activeSessions.delete(token);
+    // Also drop any terminal still attached to this session.
+    closeSessionSockets(token, '로그아웃되어 세션이 종료되었습니다.');
   }
   // Clear Cookie
   res.setHeader('Set-Cookie', 'session_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');
@@ -1371,16 +1562,44 @@ wss.on('connection', (ws, req) => {
   const termCols = clampTermCols(urlParams.searchParams.get('cols'));
   const termRows = clampTermRows(urlParams.searchParams.get('rows'));
 
-  // Authenticate WebSocket Session
-  const cookies = req.headers.cookie || '';
-  const tokenMatch = cookies.match(/session_token=([^;]+)/);
-  const token = tokenMatch ? tokenMatch[1] : null;
+  // Authenticate WebSocket Session.
+  // Use the same exact-name cookie parser as the HTTP path: the old regex was a
+  // substring match, so a cookie named e.g. x_session_token was picked up here but not
+  // there, letting a sibling subdomain break terminals while the rest of the UI worked.
+  const token = getCookie(req, 'session_token');
+  const session = getSession(token);
 
-  if (!getSession(token)) {
+  if (!session) {
     ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized WebSocket session.' }));
     ws.close();
     return;
   }
+
+  // A shell must not outlive the session that opened it. The session used to be checked
+  // once at handshake and never again, and keepaliveInterval actively held the socket up,
+  // so an open terminal tab kept a root shell alive past the 8h TTL and past an explicit
+  // logout — making both "logged out" and "expired" false for the highest-value
+  // capability in the app.
+  trackSessionSocket(token, ws);
+  const expiryTimer = setTimeout(() => {
+    try {
+      ws.send(JSON.stringify({ type: 'error', message: '세션이 만료되어 연결을 종료합니다.' }));
+    } catch { /* already closing */ }
+    ws.close(1008, 'Session expired');
+  }, Math.max(0, session.expiresAt - Date.now()));
+
+  const revalidate = setInterval(() => {
+    if (!getSession(token)) {
+      clearInterval(revalidate);
+      ws.close(1008, 'Session revoked');
+    }
+  }, 30000);
+
+  ws.on('close', () => {
+    clearTimeout(expiryTimer);
+    clearInterval(revalidate);
+    untrackSessionSocket(token, ws);
+  });
 
   const connections = readConnections();
   const connInfo = connections.find(c => c.id === id);
