@@ -170,21 +170,37 @@ docker compose up -d
 ## 백업 및 마이그레이션
 
 서버 목록, 인증 정보, SSH 개인키는 Git 저장소가 아닌 Docker named volume에 저장됩니다.
-Compose 배포는 `web-ssh-data`, 로컬 빌드는 `ssh-connect-data` 볼륨을 사용합니다.
 Node.js로 직접 실행할 때는 기본적으로 `~/.local/share/web-ssh`에 저장되며,
 필요하면 `DATA_DIR` 환경변수로 저장소 밖의 다른 보안 경로를 지정할 수 있습니다.
 
-기존 `./data`를 named volume로 옮길 때는 컨테이너를 정지한 후 다음처럼 복사합니다.
+### 볼륨 이름 확인
+
+`docker compose`는 volume 이름에 **프로젝트 이름을 접두사로 붙입니다.** compose 파일에
+`ssh-connect-data`라고 적혀 있어도 실제 볼륨은 `<프로젝트>_ssh-connect-data`
+(예: `ssh-connect_ssh-connect-data`)가 됩니다. 데이터를 옮길 때 접두사 없는 이름에
+복사하면 컨테이너는 빈 볼륨을 마운트하므로, 항상 실제 이름을 먼저 확인하세요.
 
 ```bash
-docker volume create web-ssh-data
-docker run --rm \
-  -v "$(pwd)/data:/source:ro" \
-  -v web-ssh-data:/target \
-  alpine sh -c 'cp -a /source/. /target/ && chmod -R go-rwx /target'
+docker inspect <컨테이너> --format '{{range .Mounts}}{{.Name}}{{end}}'
 ```
 
+### 기존 데이터를 볼륨으로 옮기기
+
+컨테이너를 정지한 후, 위에서 확인한 실제 볼륨 이름으로 복사합니다.
+
+```bash
+VOL=$(docker inspect ssh-connect --format '{{range .Mounts}}{{.Name}}{{end}}')
+docker run --rm \
+  -v "$HOME/.local/share/web-ssh:/source:ro" \
+  -v "$VOL:/target" \
+  alpine sh -c 'cp -a /source/. /target/ && chmod 700 /target /target/keys && chmod 600 /target/*.json /target/keys/*.pem'
+```
+
+`auth.json`을 복사하지 않으면 다음 기동 때 `ADMIN_USERNAME` / `ADMIN_PASSWORD`
+환경변수로 관리자 계정이 새로 만들어집니다. 비밀번호를 교체하려면 이 방법이 가장 간단합니다.
+
 백업도 저장소 폴더가 아닌 별도 보안 경로에 만들고 Git에는 추가하지 마세요.
+과거 노출된 키나 아카이브는 실행 중인 컨테이너의 데이터 볼륨에 남겨두지 마세요.
 
 ---
 
